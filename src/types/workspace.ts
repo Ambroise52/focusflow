@@ -1,345 +1,301 @@
 /**
- * Workspace Type Definitions
+ * FocusFlow Extension - Workspace Type Definitions
  * 
- * Defines the structure for workspaces - organized collections of tabs
- * grouped by context (work, research, shopping, etc.)
+ * Defines the core Workspace interface and related types.
+ * This is the central data structure for organizing tabs into contextual groups.
+ * 
+ * @module types/workspace
  */
 
-import type { Tab, TabId } from './tab';
+import type { Tab } from './tab';
 
 /**
- * Unique identifier for a workspace
- * Using UUID v4 format for uniqueness across devices
+ * Workspace - A collection of tabs organized by context
  * 
- * @example "550e8400-e29b-41d4-a716-446655440000"
- */
-export type WorkspaceId = string;
-
-/**
- * Hex color code for workspace visual coding
- * Used to visually distinguish workspaces in the UI
+ * Workspaces allow users to group related tabs together and switch between
+ * different contexts (e.g., "Work", "Research", "Shopping") without losing
+ * their place.
  * 
- * @example "#3B82F6" (blue)
- */
-export type WorkspaceColor = string;
-
-/**
- * Represents a workspace - a collection of tabs with shared context
- * 
- * Workspaces help users organize tabs by project, topic, or activity.
- * They can be paused (tabs closed but state saved) and resumed later.
+ * @example
+ * const myWorkspace: Workspace = {
+ *   id: 'a1b2c3d4-e5f6-7890-abcd-ef1234567890',
+ *   name: 'Development',
+ *   createdAt: Date.now(),
+ *   lastUsedAt: Date.now(),
+ *   tabs: [
+ *     { id: 1, url: 'https://github.com', title: 'GitHub', ... },
+ *     { id: 2, url: 'https://stackoverflow.com', title: 'Stack Overflow', ... },
+ *   ],
+ *   isActive: true,
+ *   isPaused: false,
+ *   color: '#3B82F6',
+ *   icon: '💻',
+ * };
  */
 export interface Workspace {
   /**
-   * Unique workspace identifier (UUID v4)
+   * Unique identifier for this workspace (UUID v4)
+   * Generated using crypto.randomUUID() or similar
    */
-  id: WorkspaceId;
-
+  id: string;
+  
   /**
-   * User-defined workspace name
-   * Can be edited inline in the UI
+   * User-defined or auto-generated workspace name
+   * Examples: "Work", "Research Project", "Shopping", "GitHub Work"
    * 
-   * @example "Client Project Research"
-   * @example "Weekend Learning"
+   * @minLength 1
+   * @maxLength 100
    */
   name: string;
-
+  
   /**
-   * Array of tabs belonging to this workspace
-   * Preserves order for restoration
-   */
-  tabs: Tab[];
-
-  /**
-   * Timestamp when workspace was created (milliseconds)
-   * 
-   * @example 1704931200000 (Date.now())
+   * Unix timestamp when this workspace was created
+   * Generated with Date.now()
    */
   createdAt: number;
-
+  
   /**
-   * Timestamp when workspace was last accessed/modified
-   * Updated when:
-   * - Workspace is opened/resumed
+   * Unix timestamp when this workspace was last opened or modified
+   * Updated whenever:
+   * - Workspace is resumed
    * - Tabs are added/removed
-   * - Workspace is renamed
+   * - Workspace is saved to cloud
    */
   lastUsedAt: number;
-
+  
   /**
-   * Whether this workspace is currently active (tabs are open)
+   * Array of tabs in this workspace
+   * Tabs are sorted by the order they were added
+   */
+  tabs: Tab[];
+  
+  /**
+   * Whether this workspace is currently active
    * 
-   * true = tabs are open in browser
-   * false = workspace is paused (tabs hibernated)
+   * True = Workspace is open in a window right now
+   * False = Workspace is paused/saved for later
+   * 
+   * Only ONE workspace can be active at a time
    */
   isActive: boolean;
-
+  
   /**
    * Whether this workspace's tabs are currently hibernated
-   * Hibernated tabs are closed to free RAM but state is preserved
    * 
-   * This is the inverse of isActive for clarity in different contexts
+   * True = Tabs are closed/discarded to save RAM (workspace is "paused")
+   * False = Tabs are open and active
+   * 
+   * When paused, tabs can be quickly reopened from saved state
    */
   isPaused: boolean;
-
+  
   /**
-   * Optional color for visual coding in the UI
-   * Displays as a colored border on workspace cards
+   * Optional hex color code for visual coding
+   * Used to color-code workspaces in the UI (e.g., left border, badge)
    * 
-   * @example "#3B82F6" (blue)
-   * @example "#10B981" (green)
+   * @example "#3B82F6" (blue), "#10B981" (green), "#EF4444" (red)
+   * @pattern ^#[0-9A-Fa-f]{6}$
    */
-  color?: WorkspaceColor;
-
+  color?: string;
+  
   /**
-   * Optional description/notes about this workspace
-   * Not shown in MVP, reserved for future feature
-   */
-  description?: string;
-
-  /**
-   * Tags for categorization and search
-   * Not implemented in MVP, reserved for future feature
+   * Optional emoji or icon for quick visual identification
+   * Used in workspace cards, tabs, and notifications
    * 
-   * @example ["work", "urgent", "client-acme"]
+   * @example "💼" (work), "🔬" (research), "🛒" (shopping), "📚" (learning)
+   * @maxLength 2 (allows single emoji or emoji with modifier)
    */
-  tags?: string[];
-
-  /**
-   * ID of the Chrome window this workspace is associated with
-   * Used when reopening workspaces to restore window context
-   */
-  windowId?: number;
+  icon?: string;
 }
 
 /**
- * AI-generated suggestion for creating a workspace
- * Based on auto-grouping heuristics (domain, keywords, time)
+ * WorkspaceSuggestion - An auto-generated workspace recommendation
+ * 
+ * Created by the auto-grouping algorithm when it detects patterns in open tabs.
+ * Users can accept suggestions to quickly create workspaces.
+ * 
+ * @example
+ * const suggestion: WorkspaceSuggestion = {
+ *   name: 'GitHub Development',
+ *   tabs: [
+ *     { url: 'https://github.com/user/repo', ... },
+ *     { url: 'https://github.com/user/other-repo', ... },
+ *   ],
+ *   confidence: 85,
+ *   reason: 'Same domain (github.com)',
+ *   suggestedColor: '#3B82F6',
+ *   suggestedIcon: '💻',
+ * };
  */
 export interface WorkspaceSuggestion {
   /**
    * Suggested workspace name
-   * Generated from domain patterns or keywords
+   * Auto-generated based on:
+   * - Common domain (e.g., "GitHub Workspace")
+   * - Detected keywords (e.g., "Shopping")
+   * - Time of day (e.g., "Work", "Personal")
    * 
-   * @example "Development" (multiple GitHub tabs)
-   * @example "Shopping" (Amazon, eBay tabs)
+   * @example "GitHub Workspace", "Shopping", "Research"
    */
   name: string;
-
+  
   /**
    * Tabs that match this suggestion
-   * User can accept, modify, or reject the suggestion
+   * These are the tabs the algorithm thinks belong together
    */
   tabs: Tab[];
-
+  
   /**
    * Confidence score (0-100)
-   * Higher = stronger match based on heuristics
    * 
-   * Display suggestions with confidence > 60
+   * Higher scores = more confident the grouping makes sense
+   * - 90-100: Very strong pattern (e.g., all tabs from same domain)
+   * - 70-89: Good pattern (e.g., related keywords)
+   * - 60-69: Weak pattern (e.g., time-based guess)
+   * - <60: Not shown to user
    * 
-   * @example 85 (very confident)
-   * @example 45 (weak suggestion, don't show)
+   * @min 0
+   * @max 100
    */
   confidence: number;
-
+  
   /**
-   * Human-readable explanation of why this grouping was suggested
-   * Shown to user to help them understand the suggestion
+   * Human-readable explanation for this suggestion
+   * Shown to user to help them understand why this grouping was suggested
    * 
-   * @example "5 tabs from github.com domain"
-   * @example "Multiple tabs with 'recipe' in title"
+   * @example
+   * - "Same domain (github.com)"
+   * - "All tabs contain 'recipe' or 'cooking'"
+   * - "Opened during work hours"
    */
   reason: string;
-
+  
   /**
-   * The heuristic rule that triggered this suggestion
-   * Used for analytics and improving the algorithm
+   * Algorithm-suggested color for this workspace
+   * Based on category detection (e.g., blue for development, green for shopping)
    * 
-   * @example "domain_clustering"
-   * @example "keyword_detection"
-   * @example "time_based"
+   * @example "#3B82F6" (development), "#10B981" (shopping)
    */
-  ruleType: 'domain_clustering' | 'keyword_detection' | 'time_based' | 'custom';
-
+  suggestedColor?: string;
+  
+  /**
+   * Algorithm-suggested icon for this workspace
+   * Based on category detection
+   * 
+   * @example "💻" (development), "🛒" (shopping), "📚" (research)
+   */
+  suggestedIcon?: string;
+  
   /**
    * Timestamp when this suggestion was generated
+   * Used to expire old suggestions (don't show suggestions from yesterday)
    */
-  generatedAt: number;
-
-  /**
-   * Optional color recommendation for this workspace
-   */
-  suggestedColor?: WorkspaceColor;
+  createdAt?: number;
 }
 
 /**
- * Parameters for creating a new workspace
- * Makes certain fields optional for convenience
+ * WorkspaceMetadata - Computed metadata about a workspace
+ * 
+ * This is not stored directly, but calculated on-demand from the Workspace object.
+ * Useful for displaying stats in the UI.
+ * 
+ * @example
+ * const metadata: WorkspaceMetadata = {
+ *   tabCount: 12,
+ *   importantTabCount: 3,
+ *   totalSize: '2.3 GB',
+ *   domains: ['github.com', 'stackoverflow.com'],
+ *   lastUsedRelative: '2 hours ago',
+ * };
  */
-export type CreateWorkspaceParams = {
-  name: string;
-  tabs?: Tab[];
-  color?: WorkspaceColor;
-  description?: string;
-  tags?: string[];
-};
-
-/**
- * Parameters for updating an existing workspace
- * All fields optional except ID
- */
-export type UpdateWorkspaceParams = Partial<Omit<Workspace, 'id' | 'createdAt'>> & {
-  id: WorkspaceId;
-};
-
-/**
- * Filter criteria for querying workspaces
- */
-export interface WorkspaceFilter {
-  /**
-   * Filter by active status
-   */
-  isActive?: boolean;
-
-  /**
-   * Filter by paused status
-   */
-  isPaused?: boolean;
-
-  /**
-   * Search by name (case-insensitive partial match)
-   */
-  nameContains?: string;
-
-  /**
-   * Filter by tag (exact match)
-   */
-  hasTag?: string;
-
-  /**
-   * Only return workspaces with at least this many tabs
-   */
-  minTabs?: number;
-
-  /**
-   * Only return workspaces with at most this many tabs
-   */
-  maxTabs?: number;
-
-  /**
-   * Only return workspaces used after this timestamp
-   */
-  usedAfter?: number;
-
-  /**
-   * Only return workspaces used before this timestamp
-   */
-  usedBefore?: number;
-}
-
-/**
- * Sort options for workspace lists
- */
-export type WorkspaceSortBy = 
-  | 'lastUsedAt'    // Most recently used first
-  | 'createdAt'     // Newest first
-  | 'name'          // Alphabetical
-  | 'tabCount';     // Most tabs first
-
-/**
- * Workspace sorting configuration
- */
-export interface WorkspaceSortOptions {
-  sortBy: WorkspaceSortBy;
-  direction: 'asc' | 'desc';
-}
-
-/**
- * Statistics about a workspace
- * Used for displaying insights to users
- */
-export interface WorkspaceStats {
+export interface WorkspaceMetadata {
   /**
    * Total number of tabs in workspace
    */
   tabCount: number;
-
+  
   /**
-   * Number of starred/important tabs
+   * Number of tabs marked as important (starred)
    */
   importantTabCount: number;
-
+  
   /**
-   * Number of discarded (hibernated) tabs
-   */
-  discardedTabCount: number;
-
-  /**
-   * Estimated total memory usage in MB
-   * Only available if browser supports memory API
-   */
-  estimatedMemoryMB?: number;
-
-  /**
-   * Most common domain in this workspace
-   * Used to show primary context
+   * Estimated total memory usage (formatted string)
+   * Calculated as: tabCount × 75MB (average per tab)
    * 
-   * @example "github.com"
+   * @example "900 MB", "2.3 GB"
    */
-  primaryDomain?: string;
-
+  totalSize: string;
+  
   /**
-   * How long ago (in ms) this workspace was last used
+   * Unique domains in this workspace
+   * Used to show "Contains tabs from: github.com, docs.google.com"
    */
-  timeSinceLastUse: number;
-
+  domains: string[];
+  
   /**
-   * Number of days this workspace has existed
+   * Human-readable time since last use
+   * 
+   * @example "just now", "2 hours ago", "3 days ago"
    */
-  ageInDays: number;
+  lastUsedRelative: string;
 }
 
 /**
- * Result of a workspace operation
+ * Type guard to check if an object is a valid Workspace
+ * Useful for validating data from storage or API
+ * 
+ * @param obj - Object to check
+ * @returns True if object matches Workspace interface
+ * 
+ * @example
+ * if (isWorkspace(data)) {
+ *   console.log('Valid workspace:', data.name);
+ * }
  */
-export interface WorkspaceOperationResult {
-  success: boolean;
-  workspaceId?: WorkspaceId;
-  error?: string;
-  /**
-   * Additional context about the operation
-   */
-  message?: string;
+export function isWorkspace(obj: any): obj is Workspace {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    typeof obj.id === 'string' &&
+    typeof obj.name === 'string' &&
+    typeof obj.createdAt === 'number' &&
+    typeof obj.lastUsedAt === 'number' &&
+    Array.isArray(obj.tabs) &&
+    typeof obj.isActive === 'boolean' &&
+    typeof obj.isPaused === 'boolean' &&
+    (obj.color === undefined || typeof obj.color === 'string') &&
+    (obj.icon === undefined || typeof obj.icon === 'string')
+  );
 }
 
 /**
- * Predefined workspace colors
- * Used in color picker UI
+ * Type guard to check if an object is a valid WorkspaceSuggestion
+ * 
+ * @param obj - Object to check
+ * @returns True if object matches WorkspaceSuggestion interface
  */
-export const WORKSPACE_COLORS = {
-  BLUE: '#3B82F6',
-  GREEN: '#10B981',
-  YELLOW: '#F59E0B',
-  RED: '#EF4444',
-  PURPLE: '#8B5CF6',
-  PINK: '#EC4899',
-  GRAY: '#6B7280',
-  ORANGE: '#F97316',
-} as const;
+export function isWorkspaceSuggestion(obj: any): obj is WorkspaceSuggestion {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    typeof obj.name === 'string' &&
+    Array.isArray(obj.tabs) &&
+    typeof obj.confidence === 'number' &&
+    obj.confidence >= 0 &&
+    obj.confidence <= 100 &&
+    typeof obj.reason === 'string'
+  );
+}
 
 /**
- * Default workspace color
+ * Default empty workspace (useful for initialization)
  */
-export const DEFAULT_WORKSPACE_COLOR = WORKSPACE_COLORS.BLUE;
-
-/**
- * Maximum number of workspaces allowed in free tier
- */
-export const MAX_FREE_WORKSPACES = 5;
-
-/**
- * Maximum number of tabs recommended per workspace
- * Beyond this, suggest splitting into multiple workspaces
- */
-export const RECOMMENDED_MAX_TABS_PER_WORKSPACE = 20;
+export const EMPTY_WORKSPACE: Omit<Workspace, 'id'> = {
+  name: 'New Workspace',
+  createdAt: Date.now(),
+  lastUsedAt: Date.now(),
+  tabs: [],
+  isActive: false,
+  isPaused: false,
+};
