@@ -8,6 +8,7 @@
  * @module background/index
  */
 
+import * as TabManager from './tabManager';
 import { handleSuggestionNotificationClick } from './autoGrouping';
 import { 
   initializeStorage, 
@@ -336,6 +337,44 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case 'TRIGGER_CLEANUP':
           await handleCleanup();
           sendResponse({ success: true });
+          break;
+
+        case 'PAUSE_WORKSPACE':
+          const pauseResult = await TabManager.pauseWorkspace(request.workspaceId);
+          sendResponse({ success: true, data: pauseResult });
+          break;
+
+        case 'RESUME_WORKSPACE':
+          const resumeResult = await TabManager.resumeWorkspace(request.workspaceId);
+          sendResponse({ success: true, data: resumeResult });
+          break;
+
+        case 'FIND_DUPLICATES':
+          const dupResult = await TabManager.findDuplicateTabs(request.closeAutomatically);
+          sendResponse({ success: true, data: dupResult });
+          break;
+
+        case 'GET_MEMORY_STATS':
+          const memStats = await TabManager.getMemoryStats();
+          sendResponse({ success: true, data: memStats });
+          break;
+
+        case 'FIND_STALE_TABS':
+          const staleResult = await TabManager.findStaleTabs(request.daysThreshold);
+          sendResponse({ success: true, data: staleResult });
+          break;
+
+        case 'MOVE_TABS':
+          const moveResult = await TabManager.moveTabsToWorkspace(
+            request.tabIds, 
+            request.workspaceId
+          );
+          sendResponse({ success: true, data: moveResult });
+          break;
+
+        case 'CLOSE_WORKSPACE_TABS':
+          const closeResult = await TabManager.closeWorkspaceTabs(request.workspaceId);
+          sendResponse({ success: true, data: closeResult });
           break;
 
         default:
