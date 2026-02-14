@@ -8,6 +8,7 @@
  * @module background/index
  */
 
+import { handleSuggestionNotificationClick } from './autoGrouping';
 import { 
   initializeStorage, 
   getSettings, 
@@ -17,6 +18,7 @@ import {
   saveWorkspace
 } from '../lib/storage';
 import { DEBUG, ALARM_NAMES } from '../lib/constants';
+import { initializeTabListeners } from './tabListener';
 import type { UserSettings } from '../types/settings';
 
 /**
@@ -37,6 +39,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
     // Set up periodic alarms (run regardless of install/update)
     await setupAlarms();
+
+    // Initialize tab listeners
+    initializeTabListeners();
 
     if (DEBUG) {
       console.log('✅ FocusFlow installation complete');
@@ -360,6 +365,9 @@ chrome.runtime.onStartup.addListener(async () => {
     // Ensure alarms are set up (in case they were cleared)
     await setupAlarms();
 
+    // Initialize tab listeners
+    initializeTabListeners();
+
     // Log startup
     const settings = await getSettings();
     if (DEBUG) {
@@ -425,6 +433,15 @@ if (DEBUG) {
   console.log('✅ FocusFlow background service worker loaded');
   console.log(`Version: ${chrome.runtime.getManifest().version}`);
 }
+
+/**
+ * Notification button click handler
+ */
+chrome.notifications.onButtonClicked.addListener(async (notificationId, buttonIndex) => {
+  if (notificationId.startsWith('suggestion-')) {
+    await handleSuggestionNotificationClick(notificationId, buttonIndex);
+  }
+});
 
 // Export for testing (if needed)
 export { 
