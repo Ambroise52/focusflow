@@ -5,6 +5,7 @@
   "description": "Automatically organize your browser tabs into intelligent workspaces. Pause, resume, and sync across devices.",
   "author": "Ambroise Mutima",
   "license": "MIT",
+  "type": "module",
   "scripts": {
     "dev": "plasmo dev",
     "build": "plasmo build",
@@ -40,7 +41,20 @@
       "tabs",
       "storage",
       "contextMenus",
-      "activeTab"
-    ]
+      "activeTab",
+      "alarms",
+      "notifications"
+    ],
+    "icons": {
+      "16": "../assets/icon16.png",
+      "48": "../assets/icon48.png",
+      "128": "../assets/icon128.png"
+    },
+    "action": {
+      "default_icon": {
+        "16": "../assets/icon16.png",
+        "48": "../assets/icon48.png"
+      }
+    }
   }
 }

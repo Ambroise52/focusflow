@@ -1,268 +1,610 @@
 /**
  * FocusFlow Tab Manager
- * 
- * Handles all tab manipulation operations:
- * - Pause/Resume workspaces (discard/reopen tabs)
- * - Duplicate detection and merging
- * - Memory usage calculations
- * - Tab archiving suggestions
- * - Pin/unpin, move, close operations
- * 
- * Uses chrome.tabs API extensively to manage browser tabs.
- * 
+ *
+ * Handles all tab and workspace operations:
+ *   - Pause / resume workspaces (hibernate tabs to save memory)
+ *   - Duplicate tab detection and cleanup
+ *   - Memory usage estimation
+ *   - Stale tab identification
+ *   - Moving tabs between workspaces
+ *   - Closing workspace tabs
+ *   - Pin / mute individual tabs
+ *
  * @module background/tabManager
  */
 
-import { 
-  getWorkspace, 
-  saveWorkspace, 
-  updateWorkspace,
+import {
+  getWorkspace,
+  getWorkspaces,
+  saveWorkspace,
   getAllTabs,
+  getTab,
   saveTab,
-  deleteTab 
+  deleteTab,
 } from '../lib/storage';
-import { calculateMemorySaved, sanitizeUrl, extractDomain } from '../lib/utils';
+import { calculateMemorySaved, sanitizeUrl } from '../lib/utils';
 import { DEBUG } from '../lib/constants';
 import type { Workspace } from '../types/workspace';
 import type { Tab } from '../types/tab';
 
-/**
- * Average memory per tab (MB)
- * Based on Chrome's typical memory usage patterns
- */
-const AVG_TAB_MEMORY_MB = 75; // Conservative estimate
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Result returned by findDuplicateTabs(). */
+export interface DuplicateTabResult {
+  /** URL shared by the duplicate group. */
+  url: string;
+  /** IDs of all Chrome tabs open at that URL (first = kept, rest = duplicates). */
+  tabIds: number[];
+  /** Number of duplicate tabs (tabIds.length - 1). */
+  duplicateCount: number;
+}
+
+/** Snapshot of current memory usage across all tracked tabs. */
+export interface MemoryStats {
+  /** Total number of tabs currently tracked in storage. */
+  totalTabs: number;
+  /** Number of tabs that are paused (discarded / hibernated). */
+  pausedTabs: number;
+  /** Number of tabs that are actively open in a browser window. */
+  activeTabs: number;
+  /** Estimated MB saved by pausing tabs (rough heuristic). */
+  estimatedMBSaved: number;
+  /** Number of workspaces currently marked as paused. */
+  pausedWorkspaces: number;
+}
+
+/** A tab that has not been accessed for longer than the stale threshold. */
+export interface StaleTab {
+  /** The stored tab metadata. */
+  tab: Tab;
+  /** Number of days since the tab was last accessed. */
+  daysInactive: number;
+}
+
+/** Result of a moveTabsToWorkspace() call. */
+export interface MoveResult {
+  /** Number of tabs successfully moved. */
+  moved: number;
+  /** Number of tabs that could not be moved (not found, already in workspace). */
+  skipped: number;
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 /**
- * Pause a workspace - discard all tabs to free RAM
- * Keeps tabs in storage but removes them from memory
- * 
- * @param workspaceId - ID of workspace to pause
- * @returns Object with success status and memory saved
+ * URL schemes that must never be discarded by Chrome.
+ * Attempting chrome.tabs.discard() on these throws an error.
  */
-export async function pauseWorkspace(workspaceId: string): Promise<{
-  success: boolean;
-  memorySaved: number;
-  tabCount: number;
-  error?: string;
-}> {
+const NON_DISCARDABLE_SCHEMES = [
+  'chrome://',
+  'chrome-extension://',
+  'edge://',
+  'about:',
+  'data:',
+  'file://',
+  'view-source://',
+];
+
+/** Average memory footprint per tab in MB (used for estimates). */
+const AVERAGE_TAB_MB = 150;
+
+// ---------------------------------------------------------------------------
+// Pause / Resume workspace
+// ---------------------------------------------------------------------------
+
+/**
+ * Pauses a workspace by discarding all its open tabs from memory.
+ * The tab URLs are preserved in storage so the workspace can be resumed.
+ * Pinned, active, and audible tabs are skipped (cannot/should not be discarded).
+ *
+ * @param workspaceId - UUID of the workspace to pause
+ * @returns Number of tabs successfully discarded
+ */
+export async function pauseWorkspace(workspaceId: string): Promise<number> {
   try {
     if (DEBUG) {
       console.log(`⏸️  Pausing workspace: ${workspaceId}`);
     }
 
-    // Get workspace
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      throw new Error('Workspace not found');
+      console.error(`❌ Workspace not found: ${workspaceId}`);
+      return 0;
     }
 
-    if (workspace.isPaused) {
-      if (DEBUG) {
-        console.log('⚠️  Workspace already paused');
-      }
-      return {
-        success: true,
-        memorySaved: 0,
-        tabCount: 0
-      };
-    }
+    // Query all open Chrome tabs in this workspace
+    const chromeTabs = await chrome.tabs.query({});
+    const workspaceUrls = new Set(workspace.tabs.map((t) => t.url));
 
     let discardedCount = 0;
-    const tabsToKeep: Tab[] = [];
 
-    // Process each tab
-    for (const tab of workspace.tabs) {
-      try {
-        // Try to find the actual Chrome tab
-        const chromeTabs = await chrome.tabs.query({ url: tab.url });
-        
-        if (chromeTabs.length > 0) {
-          const chromeTab = chromeTabs[0];
-          
-          // Check if tab can be discarded
-          if (canDiscardTab(chromeTab)) {
-            // Discard tab (unload from memory but keep visible in tab bar)
-            await chrome.tabs.discard(chromeTab.id!);
-            discardedCount++;
-            
-            if (DEBUG) {
-              console.log(`💤 Discarded tab: ${tab.title}`);
-            }
-          } else {
-            if (DEBUG) {
-              console.log(`⏭️  Skipped protected tab: ${tab.title}`);
-            }
-          }
+    for (const chromeTab of chromeTabs) {
+      if (!chromeTab.id || !chromeTab.url) continue;
+      if (!workspaceUrls.has(chromeTab.url)) continue;
+
+      // Skip tabs that cannot or should not be discarded
+      if (!canDiscardTab(chromeTab)) {
+        if (DEBUG) {
+          console.log(`⏭️  Skipping non-discardable tab: ${chromeTab.url}`);
         }
+        continue;
+      }
 
-        // Keep tab in workspace storage
-        tabsToKeep.push(tab);
+      try {
+        await chrome.tabs.discard(chromeTab.id);
+        discardedCount++;
 
-      } catch (error) {
-        console.error(`❌ Failed to discard tab: ${tab.title}`, error);
-        // Keep tab in storage even if discard failed
-        tabsToKeep.push(tab);
+        if (DEBUG) {
+          console.log(`💤 Discarded tab: ${chromeTab.url}`);
+        }
+      } catch (err) {
+        console.warn(`⚠️  Could not discard tab ${chromeTab.id}:`, err);
       }
     }
 
-    // Update workspace state
-    workspace.isPaused = true;
-    workspace.isActive = false;
-    workspace.tabs = tabsToKeep;
-    workspace.lastUsedAt = Date.now();
-    
-    await saveWorkspace(workspace);
-
-    const memorySaved = calculateMemorySaved(discardedCount);
+    // Mark workspace as paused in storage
+    const updatedWorkspace: Workspace = {
+      ...workspace,
+      isPaused: true,
+      isActive: false,
+    };
+    await saveWorkspace(updatedWorkspace);
 
     if (DEBUG) {
-      console.log(`✅ Workspace paused: ${discardedCount} tabs discarded, saved ${memorySaved}MB`);
+      console.log(`✅ Workspace "${workspace.name}" paused (${discardedCount} tabs discarded)`);
     }
 
-    return {
-      success: true,
-      memorySaved,
-      tabCount: discardedCount
-    };
-
+    return discardedCount;
   } catch (error) {
-    console.error('❌ Failed to pause workspace:', error);
-    return {
-      success: false,
-      memorySaved: 0,
-      tabCount: 0,
-      error: String(error)
-    };
+    console.error('❌ pauseWorkspace failed:', error);
+    return 0;
   }
 }
 
 /**
- * Resume a workspace - reopen all tabs in a new window
- * 
- * @param workspaceId - ID of workspace to resume
- * @returns Object with success status and window ID
+ * Resumes a paused workspace by opening all its saved tabs in a new window.
+ * The workspace is marked as active once the window is created.
+ *
+ * @param workspaceId - UUID of the workspace to resume
+ * @returns The newly created Chrome window, or null on failure
  */
-export async function resumeWorkspace(workspaceId: string): Promise<{
-  success: boolean;
-  windowId?: number;
-  tabCount: number;
-  error?: string;
-}> {
+export async function resumeWorkspace(
+  workspaceId: string
+): Promise<chrome.windows.Window | null> {
   try {
     if (DEBUG) {
       console.log(`▶️  Resuming workspace: ${workspaceId}`);
     }
 
-    // Get workspace
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      throw new Error('Workspace not found');
+      console.error(`❌ Workspace not found: ${workspaceId}`);
+      return null;
     }
 
     if (workspace.tabs.length === 0) {
-      throw new Error('Workspace has no tabs');
+      console.warn(`⚠️  Workspace "${workspace.name}" has no tabs to restore`);
+      return null;
     }
 
-    // Create new window for workspace
-    const firstTab = workspace.tabs[0];
-    const newWindow = await chrome.windows.create({
-      url: firstTab.url,
-      focused: true,
-      type: 'normal'
-    });
+    const urls = workspace.tabs.map((t) => t.url).filter(Boolean);
 
-    if (!newWindow || !newWindow.id) {
-      throw new Error('Failed to create window');
+    if (urls.length === 0) {
+      console.warn(`⚠️  Workspace "${workspace.name}" has no valid URLs`);
+      return null;
     }
 
-    const windowId = newWindow.id;
-    let openedCount = 1; // First tab is already open
+    // Open all tabs in a new window
+    const newWindow = await chrome.windows.create({ url: urls, focused: true });
 
-    // Open remaining tabs in the new window
-    for (let i = 1; i < workspace.tabs.length; i++) {
-      const tab = workspace.tabs[i];
-      
-      try {
-        await chrome.tabs.create({
-          windowId: windowId,
-          url: tab.url,
-          active: false,
-          pinned: tab.isImportant // Pin important tabs
-        });
-        
-        openedCount++;
+    if (!newWindow) {
+      console.error('❌ Failed to create window for workspace');
+      return null;
+    }
 
-        if (DEBUG) {
-          console.log(`📂 Opened tab: ${tab.title}`);
+    // Mark workspace as active and not paused
+    const updatedWorkspace: Workspace = {
+      ...workspace,
+      isPaused: false,
+      isActive: true,
+      lastUsedAt: Date.now(),
+    };
+    await saveWorkspace(updatedWorkspace);
+
+    if (DEBUG) {
+      console.log(
+        `✅ Workspace "${workspace.name}" resumed in window ${newWindow.id} (${urls.length} tabs)`
+      );
+    }
+
+    return newWindow;
+  } catch (error) {
+    console.error('❌ resumeWorkspace failed:', error);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Finds groups of open Chrome tabs that share the same URL.
+ * Optionally auto-closes all duplicates, keeping only the first tab per URL.
+ *
+ * @param closeAutomatically - If true, duplicate tabs are closed immediately
+ * @returns Array of duplicate groups found (including already-closed ones if auto-closed)
+ */
+export async function findDuplicateTabs(
+  closeAutomatically = false
+): Promise<DuplicateTabResult[]> {
+  try {
+    if (DEBUG) {
+      console.log('🔍 Scanning for duplicate tabs...');
+    }
+
+    const chromeTabs = await chrome.tabs.query({});
+
+    // Group tab IDs by normalised URL
+    const urlMap = new Map<string, number[]>();
+
+    for (const tab of chromeTabs) {
+      if (!tab.id || !tab.url) continue;
+      // Strip hash fragment for comparison (same page, different anchor = duplicate)
+      const normalised = tab.url.split('#')[0];
+      const existing = urlMap.get(normalised) ?? [];
+      existing.push(tab.id);
+      urlMap.set(normalised, existing);
+    }
+
+    const duplicates: DuplicateTabResult[] = [];
+
+    for (const [url, tabIds] of urlMap.entries()) {
+      if (tabIds.length < 2) continue;
+
+      duplicates.push({
+        url,
+        tabIds,
+        duplicateCount: tabIds.length - 1,
+      });
+
+      if (closeAutomatically) {
+        // Keep the first tab, close the rest
+        const toClose = tabIds.slice(1);
+        for (const id of toClose) {
+          try {
+            await chrome.tabs.remove(id);
+            if (DEBUG) {
+              console.log(`🗑️  Closed duplicate tab ${id}: ${url}`);
+            }
+          } catch (err) {
+            console.warn(`⚠️  Could not close tab ${id}:`, err);
+          }
         }
-      } catch (error) {
-        console.error(`❌ Failed to open tab: ${tab.title}`, error);
       }
     }
 
-    // Update workspace state
-    workspace.isPaused = false;
-    workspace.isActive = true;
-    workspace.lastUsedAt = Date.now();
-    
-    await saveWorkspace(workspace);
-
     if (DEBUG) {
-      console.log(`✅ Workspace resumed: ${openedCount} tabs opened in window ${windowId}`);
+      console.log(
+        `✅ Found ${duplicates.length} duplicate group(s) ` +
+          `(${duplicates.reduce((s, d) => s + d.duplicateCount, 0)} extra tabs)`
+      );
     }
 
-    return {
-      success: true,
-      windowId,
-      tabCount: openedCount
+    return duplicates;
+  } catch (error) {
+    console.error('❌ findDuplicateTabs failed:', error);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memory statistics
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a snapshot of memory-related statistics across all tracked tabs
+ * and workspaces. Uses a rough 150 MB-per-tab heuristic.
+ *
+ * @returns MemoryStats object
+ */
+export async function getMemoryStats(): Promise<MemoryStats> {
+  try {
+    if (DEBUG) {
+      console.log('📊 Calculating memory stats...');
+    }
+
+    const allStoredTabs = await getAllTabs();
+    const chromeTabs = await chrome.tabs.query({});
+    const openTabIds = new Set(chromeTabs.map((t) => t.id));
+
+    const activeTabs = allStoredTabs.filter((t) => openTabIds.has(t.id));
+    const pausedTabs = allStoredTabs.filter((t) => !openTabIds.has(t.id));
+
+    // Count paused workspaces
+    const workspaces = await getWorkspaces();
+    const pausedWorkspaces = workspaces.filter((w) => w.isPaused).length;
+
+    const estimatedMBSaved = calculateMemorySaved(pausedTabs.length);
+
+    const stats: MemoryStats = {
+      totalTabs: allStoredTabs.length,
+      activeTabs: activeTabs.length,
+      pausedTabs: pausedTabs.length,
+      estimatedMBSaved,
+      pausedWorkspaces,
     };
 
+    if (DEBUG) {
+      console.log('✅ Memory stats:', stats);
+    }
+
+    return stats;
   } catch (error) {
-    console.error('❌ Failed to resume workspace:', error);
+    console.error('❌ getMemoryStats failed:', error);
     return {
-      success: false,
-      tabCount: 0,
-      error: String(error)
+      totalTabs: 0,
+      activeTabs: 0,
+      pausedTabs: 0,
+      estimatedMBSaved: 0,
+      pausedWorkspaces: 0,
     };
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stale tab detection
+// ---------------------------------------------------------------------------
+
 /**
- * Check if a tab can be safely discarded
- * Some tabs (Chrome internal pages, pinned tabs) should not be discarded
- * 
- * @param tab - Chrome tab to check
- * @returns True if tab can be discarded
+ * Returns tabs that have not been accessed for longer than the given threshold.
+ * Useful for prompting the user to close or archive forgotten tabs.
+ *
+ * @param daysThreshold - Number of days of inactivity to qualify as stale (default 30)
+ * @returns Array of StaleTab objects sorted by daysInactive descending
+ */
+export async function findStaleTabs(daysThreshold = 30): Promise<StaleTab[]> {
+  try {
+    if (DEBUG) {
+      console.log(`🔍 Finding tabs inactive for ${daysThreshold}+ days...`);
+    }
+
+    const allTabs = await getAllTabs();
+    const now = Date.now();
+    const thresholdMs = daysThreshold * 24 * 60 * 60 * 1000;
+
+    const staleTabs: StaleTab[] = allTabs
+      .filter((tab) => now - tab.lastAccessed > thresholdMs)
+      .map((tab) => ({
+        tab,
+        daysInactive: Math.floor((now - tab.lastAccessed) / (24 * 60 * 60 * 1000)),
+      }))
+      .sort((a, b) => b.daysInactive - a.daysInactive);
+
+    if (DEBUG) {
+      console.log(`✅ Found ${staleTabs.length} stale tab(s)`);
+    }
+
+    return staleTabs;
+  } catch (error) {
+    console.error('❌ findStaleTabs failed:', error);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Move tabs between workspaces
+// ---------------------------------------------------------------------------
+
+/**
+ * Assigns the given Chrome tab IDs to a target workspace.
+ * Updates both the Tab records in storage and the Workspace's tab list.
+ *
+ * @param tabIds - Array of Chrome tab IDs to move
+ * @param workspaceId - UUID of the destination workspace
+ * @returns MoveResult with counts of moved and skipped tabs
+ */
+export async function moveTabsToWorkspace(
+  tabIds: number[],
+  workspaceId: string
+): Promise<MoveResult> {
+  try {
+    if (DEBUG) {
+      console.log(`📁 Moving ${tabIds.length} tab(s) to workspace ${workspaceId}...`);
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      console.error(`❌ Target workspace not found: ${workspaceId}`);
+      return { moved: 0, skipped: tabIds.length };
+    }
+
+    let moved = 0;
+    let skipped = 0;
+    const existingWorkspaceTabIds = new Set(workspace.tabs.map((t) => t.id));
+
+    for (const tabId of tabIds) {
+      // Fetch current tab record from storage
+      const tab = await getTab(tabId);
+
+      if (!tab) {
+        if (DEBUG) {
+          console.warn(`⚠️  Tab ${tabId} not found in storage, skipping`);
+        }
+        skipped++;
+        continue;
+      }
+
+      if (existingWorkspaceTabIds.has(tabId)) {
+        if (DEBUG) {
+          console.log(`⏭️  Tab ${tabId} already in workspace, skipping`);
+        }
+        skipped++;
+        continue;
+      }
+
+      // Update tab's workspaceId
+      const updatedTab: Tab = { ...tab, workspaceId };
+      await saveTab(updatedTab);
+
+      // Add to workspace tab list
+      workspace.tabs.push(updatedTab);
+      existingWorkspaceTabIds.add(tabId);
+      moved++;
+    }
+
+    // Persist updated workspace
+    if (moved > 0) {
+      await saveWorkspace({ ...workspace, lastUsedAt: Date.now() });
+    }
+
+    if (DEBUG) {
+      console.log(`✅ Moved ${moved} tab(s), skipped ${skipped}`);
+    }
+
+    return { moved, skipped };
+  } catch (error) {
+    console.error('❌ moveTabsToWorkspace failed:', error);
+    return { moved: 0, skipped: tabIds.length };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Close workspace tabs
+// ---------------------------------------------------------------------------
+
+/**
+ * Closes all currently open Chrome tabs that belong to the given workspace.
+ * Tab records are kept in storage so the workspace can be resumed later.
+ *
+ * @param workspaceId - UUID of the workspace whose tabs should be closed
+ * @returns Number of tabs closed
+ */
+export async function closeWorkspaceTabs(workspaceId: string): Promise<number> {
+  try {
+    if (DEBUG) {
+      console.log(`🗑️  Closing tabs for workspace: ${workspaceId}`);
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      console.error(`❌ Workspace not found: ${workspaceId}`);
+      return 0;
+    }
+
+    const workspaceUrls = new Set(workspace.tabs.map((t) => t.url));
+    const chromeTabs = await chrome.tabs.query({});
+
+    const tabsToClose = chromeTabs.filter(
+      (t) => t.id && t.url && workspaceUrls.has(t.url)
+    );
+
+    let closedCount = 0;
+
+    for (const tab of tabsToClose) {
+      if (!tab.id) continue;
+      try {
+        await chrome.tabs.remove(tab.id);
+        closedCount++;
+      } catch (err) {
+        console.warn(`⚠️  Could not close tab ${tab.id}:`, err);
+      }
+    }
+
+    // Mark workspace as inactive (not paused — tabs were closed, not hibernated)
+    await saveWorkspace({ ...workspace, isActive: false });
+
+    if (DEBUG) {
+      console.log(`✅ Closed ${closedCount} tab(s) for workspace "${workspace.name}"`);
+    }
+
+    return closedCount;
+  } catch (error) {
+    console.error('❌ closeWorkspaceTabs failed:', error);
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pin / mute individual tabs
+// ---------------------------------------------------------------------------
+
+/**
+ * Pins or unpins a Chrome tab.
+ *
+ * @param tabId - Chrome tab ID
+ * @param pinned - True to pin, false to unpin
+ */
+export async function setTabPinned(tabId: number, pinned: boolean): Promise<void> {
+  try {
+    await chrome.tabs.update(tabId, { pinned });
+
+    if (DEBUG) {
+      console.log(`📌 Tab ${tabId} ${pinned ? 'pinned' : 'unpinned'}`);
+    }
+  } catch (error) {
+    console.error(`❌ setTabPinned failed for tab ${tabId}:`, error);
+  }
+}
+
+/**
+ * Mutes or unmutes a Chrome tab.
+ *
+ * @param tabId - Chrome tab ID
+ * @param muted - True to mute, false to unmute
+ */
+export async function setTabMuted(tabId: number, muted: boolean): Promise<void> {
+  try {
+    await chrome.tabs.update(tabId, { muted });
+
+    if (DEBUG) {
+      console.log(`🔇 Tab ${tabId} ${muted ? 'muted' : 'unmuted'}`);
+    }
+  } catch (error) {
+    console.error(`❌ setTabMuted failed for tab ${tabId}:`, error);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true if a Chrome tab is safe to discard with chrome.tabs.discard().
+ *
+ * A tab MUST NOT be discarded if:
+ *   - Its URL uses a non-discardable scheme (chrome://, about:, file://, etc.)
+ *   - It is pinned (user has intentionally kept it accessible)
+ *   - It is currently active (the foreground tab)
+ *   - It is playing audio (would interrupt the user)
+ *
+ * @param tab - Chrome tab object
  */
 function canDiscardTab(tab: chrome.tabs.Tab): boolean {
   if (!tab.url) return false;
 
-  // Don't discard protected URL patterns
-  const protectedPatterns = [
-    'chrome://',
-    'chrome-extension://',
-    'edge://',
-    'about:',
-    'data:',
-    'file://',
-    'view-source:'
-  ];
-
-  if (protectedPatterns.some(pattern => tab.url!.startsWith(pattern))) {
-    return false;
+  // Block non-discardable URL schemes
+  for (const scheme of NON_DISCARDABLE_SCHEMES) {
+    if (tab.url.startsWith(scheme)) {
+      return false;
+    }
   }
 
-  // Don't discard pinned tabs
+  // Block pinned tabs
   if (tab.pinned) {
     return false;
   }
 
-  // Don't discard active tab
+  // Block active (foreground) tabs
   if (tab.active) {
     return false;
   }
 
-  // Don't discard tabs playing audio/video
+  // Block audible tabs (playing audio/video)
   if (tab.audible) {
     return false;
   }
@@ -270,398 +612,10 @@ function canDiscardTab(tab: chrome.tabs.Tab): boolean {
   return true;
 }
 
-/**
- * Find and merge duplicate tabs across all windows
- * Returns the number of duplicates closed
- * 
- * @param closeAutomatically - If true, closes duplicates automatically
- * @returns Object with duplicate count and details
- */
-export async function findDuplicateTabs(closeAutomatically: boolean = false): Promise<{
-  count: number;
-  duplicates: Array<{ url: string; tabIds: number[] }>;
-  closed: number;
-}> {
-  try {
-    if (DEBUG) {
-      console.log('🔍 Searching for duplicate tabs...');
-    }
+// ---------------------------------------------------------------------------
+// Module init
+// ---------------------------------------------------------------------------
 
-    // Get all tabs
-    const allTabs = await chrome.tabs.query({});
-    
-    // Group tabs by normalized URL
-    const urlMap = new Map<string, number[]>();
-    
-    for (const tab of allTabs) {
-      if (!tab.url || !tab.id) continue;
-      
-      // Normalize URL (remove trailing slashes, fragments)
-      const normalizedUrl = normalizeUrl(tab.url);
-      
-      if (!urlMap.has(normalizedUrl)) {
-        urlMap.set(normalizedUrl, []);
-      }
-      
-      urlMap.get(normalizedUrl)!.push(tab.id);
-    }
-
-    // Find duplicates (URLs with 2+ tabs)
-    const duplicates: Array<{ url: string; tabIds: number[] }> = [];
-    
-    for (const [url, tabIds] of urlMap.entries()) {
-      if (tabIds.length > 1) {
-        duplicates.push({ url, tabIds });
-      }
-    }
-
-    let closedCount = 0;
-
-    // Close duplicates if requested
-    if (closeAutomatically && duplicates.length > 0) {
-      for (const duplicate of duplicates) {
-        // Keep the first tab, close the rest
-        const [keepTab, ...closeTabs] = duplicate.tabIds;
-        
-        for (const tabId of closeTabs) {
-          try {
-            await chrome.tabs.remove(tabId);
-            closedCount++;
-            
-            if (DEBUG) {
-              console.log(`🗑️  Closed duplicate tab: ${duplicate.url}`);
-            }
-          } catch (error) {
-            console.error(`❌ Failed to close duplicate tab ${tabId}:`, error);
-          }
-        }
-      }
-    }
-
-    if (DEBUG) {
-      console.log(`✅ Found ${duplicates.length} duplicate URLs (${closedCount} closed)`);
-    }
-
-    return {
-      count: duplicates.length,
-      duplicates,
-      closed: closedCount
-    };
-
-  } catch (error) {
-    console.error('❌ Failed to find duplicates:', error);
-    return {
-      count: 0,
-      duplicates: [],
-      closed: 0
-    };
-  }
-}
-
-/**
- * Normalize URL for duplicate detection
- * Removes query params, fragments, trailing slashes
- * 
- * @param url - URL to normalize
- * @returns Normalized URL
- */
-function normalizeUrl(url: string): string {
-  try {
-    const urlObj = new URL(url);
-    
-    // Remove fragment (#hash)
-    urlObj.hash = '';
-    
-    // Remove query params (optional - comment out to keep params)
-    // urlObj.search = '';
-    
-    // Remove trailing slash
-    let path = urlObj.pathname;
-    if (path.endsWith('/') && path.length > 1) {
-      path = path.slice(0, -1);
-    }
-    urlObj.pathname = path;
-    
-    return urlObj.toString();
-  } catch (error) {
-    // If URL parsing fails, return original
-    return url;
-  }
-}
-
-/**
- * Calculate total memory saved from discarded tabs
- * Scans all workspaces and counts paused tabs
- * 
- * @returns Object with memory stats
- */
-export async function getMemoryStats(): Promise<{
-  totalTabsManaged: number;
-  pausedTabs: number;
-  memorySavedMB: number;
-  memorySavedGB: number;
-}> {
-  try {
-    const allTabs = await getAllTabs();
-    const chromeTabs = await chrome.tabs.query({});
-    
-    // Count discarded tabs
-    const discardedTabs = chromeTabs.filter(tab => tab.discarded).length;
-    
-    const memorySavedMB = calculateMemorySaved(discardedTabs);
-    
-    return {
-      totalTabsManaged: allTabs.length,
-      pausedTabs: discardedTabs,
-      memorySavedMB,
-      memorySavedGB: parseFloat((memorySavedMB / 1024).toFixed(2))
-    };
-
-  } catch (error) {
-    console.error('❌ Failed to calculate memory stats:', error);
-    return {
-      totalTabsManaged: 0,
-      pausedTabs: 0,
-      memorySavedMB: 0,
-      memorySavedGB: 0
-    };
-  }
-}
-
-/**
- * Find tabs that haven't been accessed in X days
- * Useful for suggesting archival
- * 
- * @param daysThreshold - Number of days (default: 30)
- * @returns Array of stale tabs
- */
-export async function findStaleTabs(daysThreshold: number = 30): Promise<{
-  count: number;
-  tabs: Tab[];
-}> {
-  try {
-    if (DEBUG) {
-      console.log(`🕰️  Finding tabs not accessed in ${daysThreshold} days...`);
-    }
-
-    const allTabs = await getAllTabs();
-    const thresholdTimestamp = Date.now() - (daysThreshold * 24 * 60 * 60 * 1000);
-    
-    const staleTabs = allTabs.filter(tab => 
-      tab.lastAccessed < thresholdTimestamp && !tab.isImportant
-    );
-
-    if (DEBUG) {
-      console.log(`✅ Found ${staleTabs.length} stale tabs`);
-    }
-
-    return {
-      count: staleTabs.length,
-      tabs: staleTabs
-    };
-
-  } catch (error) {
-    console.error('❌ Failed to find stale tabs:', error);
-    return {
-      count: 0,
-      tabs: []
-    };
-  }
-}
-
-/**
- * Move tabs to a workspace
- * 
- * @param tabIds - Chrome tab IDs to move
- * @param workspaceId - Target workspace ID
- * @returns Success status
- */
-export async function moveTabsToWorkspace(
-  tabIds: number[], 
-  workspaceId: string
-): Promise<{ success: boolean; count: number; error?: string }> {
-  try {
-    if (DEBUG) {
-      console.log(`📁 Moving ${tabIds.length} tabs to workspace ${workspaceId}`);
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      throw new Error('Workspace not found');
-    }
-
-    let movedCount = 0;
-
-    for (const tabId of tabIds) {
-      try {
-        const chromeTab = await chrome.tabs.get(tabId);
-        
-        if (!chromeTab.url) continue;
-
-        // Create tab metadata
-        const tab: Tab = {
-          id: chromeTab.id!,
-          url: sanitizeUrl(chromeTab.url),
-          title: chromeTab.title || 'Untitled',
-          favIconUrl: chromeTab.favIconUrl,
-          isImportant: false,
-          lastAccessed: Date.now(),
-          workspaceId: workspaceId
-        };
-
-        // Add to workspace
-        workspace.tabs.push(tab);
-        await saveTab(tab);
-        
-        movedCount++;
-
-      } catch (error) {
-        console.error(`❌ Failed to move tab ${tabId}:`, error);
-      }
-    }
-
-    // Update workspace
-    workspace.lastUsedAt = Date.now();
-    await saveWorkspace(workspace);
-
-    if (DEBUG) {
-      console.log(`✅ Moved ${movedCount} tabs to workspace`);
-    }
-
-    return {
-      success: true,
-      count: movedCount
-    };
-
-  } catch (error) {
-    console.error('❌ Failed to move tabs:', error);
-    return {
-      success: false,
-      count: 0,
-      error: String(error)
-    };
-  }
-}
-
-/**
- * Close all tabs in a workspace
- * 
- * @param workspaceId - ID of workspace
- * @returns Success status and count
- */
-export async function closeWorkspaceTabs(workspaceId: string): Promise<{
-  success: boolean;
-  count: number;
-  error?: string;
-}> {
-  try {
-    if (DEBUG) {
-      console.log(`🗑️  Closing all tabs in workspace: ${workspaceId}`);
-    }
-
-    const workspace = await getWorkspace(workspaceId);
-    if (!workspace) {
-      throw new Error('Workspace not found');
-    }
-
-    let closedCount = 0;
-
-    // Close each tab
-    for (const tab of workspace.tabs) {
-      try {
-        // Find and close the Chrome tab
-        const chromeTabs = await chrome.tabs.query({ url: tab.url });
-        
-        for (const chromeTab of chromeTabs) {
-          if (chromeTab.id) {
-            await chrome.tabs.remove(chromeTab.id);
-            closedCount++;
-          }
-        }
-
-      } catch (error) {
-        console.error(`❌ Failed to close tab: ${tab.title}`, error);
-      }
-    }
-
-    if (DEBUG) {
-      console.log(`✅ Closed ${closedCount} tabs`);
-    }
-
-    return {
-      success: true,
-      count: closedCount
-    };
-
-  } catch (error) {
-    console.error('❌ Failed to close workspace tabs:', error);
-    return {
-      success: false,
-      count: 0,
-      error: String(error)
-    };
-  }
-}
-
-/**
- * Pin/unpin a tab
- * 
- * @param tabId - Chrome tab ID
- * @param pinned - True to pin, false to unpin
- * @returns Success status
- */
-export async function setTabPinned(
-  tabId: number, 
-  pinned: boolean
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    await chrome.tabs.update(tabId, { pinned });
-    
-    if (DEBUG) {
-      console.log(`📌 Tab ${tabId} ${pinned ? 'pinned' : 'unpinned'}`);
-    }
-
-    return { success: true };
-
-  } catch (error) {
-    console.error('❌ Failed to pin/unpin tab:', error);
-    return {
-      success: false,
-      error: String(error)
-    };
-  }
-}
-
-/**
- * Mute/unmute a tab
- * 
- * @param tabId - Chrome tab ID
- * @param muted - True to mute, false to unmute
- * @returns Success status
- */
-export async function setTabMuted(
-  tabId: number, 
-  muted: boolean
-): Promise<{ success: boolean; error?: string }> {
-  try {
-    await chrome.tabs.update(tabId, { muted });
-    
-    if (DEBUG) {
-      console.log(`🔇 Tab ${tabId} ${muted ? 'muted' : 'unmuted'}`);
-    }
-
-    return { success: true };
-
-  } catch (error) {
-    console.error('❌ Failed to mute/unmute tab:', error);
-    return {
-      success: false,
-      error: String(error)
-    };
-  }
-}
-
-// Log that tab manager module is loaded
 if (DEBUG) {
-  console.log('✅ Tab manager module loaded');
+  console.log('✅ tabManager module loaded');
 }

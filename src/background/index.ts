@@ -10,6 +10,7 @@
 
 import * as TabManager from './tabManager';
 import { handleSuggestionNotificationClick } from './autoGrouping';
+import { syncWorkspaces } from '../lib/supabase';
 import { 
   initializeStorage, 
   getSettings, 
@@ -20,7 +21,6 @@ import {
 } from '../lib/storage';
 import { DEBUG, ALARM_NAMES } from '../lib/constants';
 import { initializeTabListeners } from './tabListener';
-import type { UserSettings } from '../types/settings';
 
 /**
  * Extension installation handler
@@ -44,6 +44,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // Initialize tab listeners
     initializeTabListeners();
 
+    // Set up context menu items
+    setupContextMenus();
+
     if (DEBUG) {
       console.log('✅ FocusFlow installation complete');
     }
@@ -64,13 +67,13 @@ async function handleFirstInstall(): Promise<void> {
   // Initialize storage with default values
   await initializeStorage();
 
-  // Create a welcome workspace with helpful tabs
+  // Create a welcome workspace
   const welcomeWorkspace = {
     id: crypto.randomUUID(),
     name: '👋 Welcome to FocusFlow',
     tabs: [
       {
-        id: 0, // Placeholder ID (will be replaced when tabs are actually opened)
+        id: 0,
         url: 'https://github.com/Ambroise57/focusflow',
         title: 'FocusFlow - GitHub Repository',
         isImportant: true,
@@ -87,15 +90,11 @@ async function handleFirstInstall(): Promise<void> {
 
   await saveWorkspace(welcomeWorkspace);
 
-  // Open welcome page (optional - can be disabled in production)
   if (DEBUG) {
     chrome.tabs.create({
       url: 'https://github.com/Ambroise57/focusflow',
       active: true
     });
-  }
-
-  if (DEBUG) {
     console.log('✅ First install complete - welcome workspace created');
   }
 }
@@ -111,13 +110,6 @@ async function handleUpdate(previousVersion?: string): Promise<void> {
     console.log(`🔄 Updating from version ${previousVersion}`);
   }
 
-  // Future migration logic can go here
-  // Example:
-  // if (previousVersion && compareVersions(previousVersion, '2.0.0') < 0) {
-  //   await migrateToV2();
-  // }
-
-  // For now, just log the update
   const currentVersion = chrome.runtime.getManifest().version;
   console.log(`✅ Updated to version ${currentVersion}`);
 }
@@ -138,13 +130,13 @@ async function setupAlarms(): Promise<void> {
 
   // Daily cleanup at 3 AM
   chrome.alarms.create(ALARM_NAMES.CLEANUP, {
-    when: getNextMidnight(3), // 3 AM
-    periodInMinutes: 60 * 24 // Daily
+    when: getNextMidnight(3),
+    periodInMinutes: 60 * 24
   });
 
   // Cloud sync every 30 minutes (for premium users)
   chrome.alarms.create(ALARM_NAMES.SYNC, {
-    delayInMinutes: 1, // Start 1 minute after install
+    delayInMinutes: 1,
     periodInMinutes: 30
   });
 
@@ -170,12 +162,28 @@ function getNextMidnight(hour: number): number {
   const target = new Date();
   target.setHours(hour, 0, 0, 0);
 
-  // If target time has passed today, schedule for tomorrow
   if (target <= now) {
     target.setDate(target.getDate() + 1);
   }
 
   return target.getTime();
+}
+
+/**
+ * Set up context menu items
+ */
+function setupContextMenus(): void {
+  chrome.contextMenus.create({
+    id: 'save-to-workspace',
+    title: 'Save tab to workspace',
+    contexts: ['page']
+  });
+
+  chrome.contextMenus.create({
+    id: 'create-workspace',
+    title: 'Create workspace from tabs',
+    contexts: ['page']
+  });
 }
 
 /**
@@ -218,8 +226,7 @@ async function handleCleanup(): Promise<void> {
   }
 
   try {
-    const deleted = await cleanupOldWorkspaces(30); // 30-day retention
-    
+    const deleted = await cleanupOldWorkspaces(30);
     if (DEBUG) {
       console.log(`✅ Cleanup complete - removed ${deleted} old workspaces`);
     }
@@ -235,8 +242,7 @@ async function handleCleanup(): Promise<void> {
 async function handleSync(): Promise<void> {
   try {
     const settings = await getSettings();
-    
-    // Only sync if user is premium and has sync enabled
+
     if (!settings.isPremium || !settings.syncEnabled) {
       if (DEBUG) {
         console.log('⏭️  Skipping sync (not premium or sync disabled)');
@@ -248,8 +254,6 @@ async function handleSync(): Promise<void> {
       console.log('☁️  Syncing workspaces to cloud...');
     }
 
-    // Import supabase sync function dynamically to avoid loading for free users
-    const { syncWorkspaces } = await import('../lib/supabase');
     const result = await syncWorkspaces();
 
     if (DEBUG) {
@@ -271,31 +275,24 @@ async function handleMemoryCheck(): Promise<void> {
 
   try {
     const settings = await getSettings();
-    
-    // Only run if user has auto-grouping enabled
+
     if (!settings.enableAutoGrouping) {
       return;
     }
 
-    // Get all tabs
     const tabs = await chrome.tabs.query({});
     const unusedTabs = tabs.filter(tab => {
-      // Find tabs that haven't been accessed in 1 hour and aren't pinned
       const oneHourAgo = Date.now() - (60 * 60 * 1000);
-      return !tab.pinned && 
-             !tab.active && 
-             tab.lastAccessed && 
+      return !tab.pinned &&
+             !tab.active &&
+             tab.lastAccessed &&
              tab.lastAccessed < oneHourAgo;
     });
 
     if (unusedTabs.length >= 10) {
-      // Show notification suggesting to pause unused tabs
       if (DEBUG) {
         console.log(`💡 Found ${unusedTabs.length} unused tabs - could suggest grouping`);
       }
-
-      // This will trigger auto-grouping suggestion in tabListener
-      // (which we'll build in the next file)
     }
   } catch (error) {
     console.error('❌ Memory check failed:', error);
@@ -310,7 +307,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('📨 Message received:', request);
   }
 
-  // Handle messages asynchronously
   (async () => {
     try {
       switch (request.action) {
@@ -366,7 +362,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         case 'MOVE_TABS':
           const moveResult = await TabManager.moveTabsToWorkspace(
-            request.tabIds, 
+            request.tabIds,
             request.workspaceId
           );
           sendResponse({ success: true, data: moveResult });
@@ -401,13 +397,9 @@ chrome.runtime.onStartup.addListener(async () => {
   }
 
   try {
-    // Ensure alarms are set up (in case they were cleared)
     await setupAlarms();
-
-    // Initialize tab listeners
     initializeTabListeners();
 
-    // Log startup
     const settings = await getSettings();
     if (DEBUG) {
       console.log('✅ FocusFlow ready', {
@@ -422,25 +414,6 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 /**
- * Context menu handler (optional)
- * Add right-click menu items for quick actions
- */
-chrome.runtime.onInstalled.addListener(() => {
-  // Create context menu items
-  chrome.contextMenus.create({
-    id: 'save-to-workspace',
-    title: 'Save tab to workspace',
-    contexts: ['page']
-  });
-
-  chrome.contextMenus.create({
-    id: 'create-workspace',
-    title: 'Create workspace from tabs',
-    contexts: ['page']
-  });
-});
-
-/**
  * Context menu click handler
  */
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
@@ -451,12 +424,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   try {
     switch (info.menuItemId) {
       case 'save-to-workspace':
-        // Open popup to select workspace
         chrome.action.openPopup();
         break;
 
       case 'create-workspace':
-        // This will be handled by autoGrouping module
         if (DEBUG) {
           console.log('Creating workspace from current tabs...');
         }
@@ -467,12 +438,6 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-// Log that background script is loaded
-if (DEBUG) {
-  console.log('✅ FocusFlow background service worker loaded');
-  console.log(`Version: ${chrome.runtime.getManifest().version}`);
-}
-
 /**
  * Notification button click handler
  */
@@ -482,12 +447,18 @@ chrome.notifications.onButtonClicked.addListener(async (notificationId, buttonIn
   }
 });
 
-// Export for testing (if needed)
-export { 
-  handleFirstInstall, 
-  handleUpdate, 
-  setupAlarms, 
-  handleCleanup, 
+// Log that background script is loaded
+if (DEBUG) {
+  console.log('✅ FocusFlow background service worker loaded');
+  console.log(`Version: ${chrome.runtime.getManifest().version}`);
+}
+
+// Export for testing
+export {
+  handleFirstInstall,
+  handleUpdate,
+  setupAlarms,
+  handleCleanup,
   handleSync,
-  handleMemoryCheck 
+  handleMemoryCheck
 };
