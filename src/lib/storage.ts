@@ -11,9 +11,12 @@
  * @module storage
  */
 
-import { STORAGE_KEYS, DEFAULT_SETTINGS, IS_DEV } from './constants';
+import { STORAGE_KEYS, DEFAULT_SETTINGS, DEBUG } from './constants';
 import { safeJsonParse, safeJsonStringify } from './utils';
 import type { Workspace, Tab, UserSettings, WorkspaceSuggestion } from '../types';
+
+// IS_DEV alias so existing internal code that references IS_DEV still works
+const IS_DEV = DEBUG;
 
 // =============================================================================
 // TYPE DEFINITIONS
@@ -54,7 +57,7 @@ interface StorageResult<T> {
 /**
  * Logs storage operations in development mode
  */
-const logStorage = (operation: string, key: string, data?: any) => {
+const logStorage = (operation: string, key: string, data?: unknown) => {
   if (IS_DEV) {
     console.log(`[Storage] ${operation}:`, key, data ? `(${JSON.stringify(data).length} bytes)` : '');
   }
@@ -66,9 +69,6 @@ const logStorage = (operation: string, key: string, data?: any) => {
 
 /**
  * Gets a value from chrome.storage.local
- * 
- * @param key - Storage key to retrieve
- * @returns Promise with the stored value or null if not found
  */
 const getLocal = async <K extends keyof LocalStorageData>(
   key: K
@@ -85,10 +85,6 @@ const getLocal = async <K extends keyof LocalStorageData>(
 
 /**
  * Sets a value in chrome.storage.local
- * 
- * @param key - Storage key
- * @param value - Value to store
- * @returns Promise that resolves when storage is complete
  */
 const setLocal = async <K extends keyof LocalStorageData>(
   key: K,
@@ -106,9 +102,6 @@ const setLocal = async <K extends keyof LocalStorageData>(
 
 /**
  * Gets a value from chrome.storage.sync
- * 
- * @param key - Storage key to retrieve
- * @returns Promise with the stored value or null if not found
  */
 const getSync = async <K extends keyof SyncStorageData>(
   key: K
@@ -125,10 +118,6 @@ const getSync = async <K extends keyof SyncStorageData>(
 
 /**
  * Sets a value in chrome.storage.sync
- * 
- * @param key - Storage key
- * @param value - Value to store
- * @returns Promise that resolves when storage is complete
  */
 const setSync = async <K extends keyof SyncStorageData>(
   key: K,
@@ -146,8 +135,6 @@ const setSync = async <K extends keyof SyncStorageData>(
 
 /**
  * Removes a key from local storage
- * 
- * @param key - Storage key to remove
  */
 const removeLocal = async (key: keyof LocalStorageData): Promise<boolean> => {
   try {
@@ -180,8 +167,6 @@ const clearLocal = async (): Promise<boolean> => {
 
 /**
  * Gets all workspaces from storage
- * 
- * @returns Promise with array of workspaces (empty array if none exist)
  */
 export const getWorkspaces = async (): Promise<Workspace[]> => {
   const workspaces = await getLocal(STORAGE_KEYS.WORKSPACES);
@@ -190,9 +175,6 @@ export const getWorkspaces = async (): Promise<Workspace[]> => {
 
 /**
  * Gets a single workspace by ID
- * 
- * @param id - Workspace ID
- * @returns Promise with workspace or null if not found
  */
 export const getWorkspaceById = async (id: string): Promise<Workspace | null> => {
   const workspaces = await getWorkspaces();
@@ -200,33 +182,31 @@ export const getWorkspaceById = async (id: string): Promise<Workspace | null> =>
 };
 
 /**
+ * Alias for getWorkspaceById — used by background worker imports.
+ */
+export const getWorkspace = async (id: string): Promise<Workspace | undefined> => {
+  const workspaces = await getWorkspaces();
+  return workspaces.find(w => w.id === id);
+};
+
+/**
  * Saves a new workspace or updates an existing one
- * 
- * @param workspace - Workspace to save
- * @returns Promise with operation result
  */
 export const saveWorkspace = async (
   workspace: Workspace
 ): Promise<StorageResult<Workspace>> => {
   try {
     const workspaces = await getWorkspaces();
-    
-    // Check if workspace already exists
     const existingIndex = workspaces.findIndex(w => w.id === workspace.id);
-    
+
     if (existingIndex !== -1) {
-      // Update existing workspace
-      workspaces[existingIndex] = {
-        ...workspace,
-        lastUsedAt: Date.now(),
-      };
+      workspaces[existingIndex] = { ...workspace, lastUsedAt: Date.now() };
     } else {
-      // Add new workspace
       workspaces.push(workspace);
     }
-    
+
     const success = await setLocal(STORAGE_KEYS.WORKSPACES, workspaces);
-    
+
     return {
       success,
       data: workspace,
@@ -234,19 +214,15 @@ export const saveWorkspace = async (
     };
   } catch (error) {
     console.error('Error saving workspace:', error);
-    return {
-      success: false,
-      error: 'An error occurred while saving workspace',
-    };
+    return { success: false, error: 'An error occurred while saving workspace' };
   }
 };
 
 /**
  * Deletes a workspace by ID
- * 
+ *
  * @param id - Workspace ID to delete
  * @param archive - If true, moves to archived instead of permanent delete
- * @returns Promise with operation result
  */
 export const deleteWorkspace = async (
   id: string,
@@ -255,41 +231,29 @@ export const deleteWorkspace = async (
   try {
     const workspaces = await getWorkspaces();
     const workspace = workspaces.find(w => w.id === id);
-    
+
     if (!workspace) {
-      return {
-        success: false,
-        error: 'Workspace not found',
-      };
+      return { success: false, error: 'Workspace not found' };
     }
-    
-    // Remove from active workspaces
+
     const updatedWorkspaces = workspaces.filter(w => w.id !== id);
     await setLocal(STORAGE_KEYS.WORKSPACES, updatedWorkspaces);
-    
-    // Archive if requested
+
     if (archive) {
       const archived = await getLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES) || [];
       archived.push({ ...workspace, lastUsedAt: Date.now() });
       await setLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES, archived);
     }
-    
+
     return { success: true };
   } catch (error) {
     console.error('Error deleting workspace:', error);
-    return {
-      success: false,
-      error: 'Failed to delete workspace',
-    };
+    return { success: false, error: 'Failed to delete workspace' };
   }
 };
 
 /**
  * Updates a workspace's tabs
- * 
- * @param workspaceId - Workspace ID
- * @param tabs - New tabs array
- * @returns Promise with operation result
  */
 export const updateWorkspaceTabs = async (
   workspaceId: string,
@@ -298,32 +262,23 @@ export const updateWorkspaceTabs = async (
   try {
     const workspaces = await getWorkspaces();
     const workspace = workspaces.find(w => w.id === workspaceId);
-    
+
     if (!workspace) {
-      return {
-        success: false,
-        error: 'Workspace not found',
-      };
+      return { success: false, error: 'Workspace not found' };
     }
-    
+
     workspace.tabs = tabs;
     workspace.lastUsedAt = Date.now();
-    
+
     return await saveWorkspace(workspace);
   } catch (error) {
     console.error('Error updating workspace tabs:', error);
-    return {
-      success: false,
-      error: 'Failed to update workspace tabs',
-    };
+    return { success: false, error: 'Failed to update workspace tabs' };
   }
 };
 
 /**
- * Marks a workspace as active
- * 
- * @param id - Workspace ID
- * @returns Promise with operation result
+ * Marks a workspace as active/inactive
  */
 export const setWorkspaceActive = async (
   id: string,
@@ -331,26 +286,20 @@ export const setWorkspaceActive = async (
 ): Promise<StorageResult<Workspace>> => {
   try {
     const workspaces = await getWorkspaces();
-    
-    // Set all workspaces to inactive first (only one can be active)
-    workspaces.forEach(w => {
-      w.isActive = false;
-    });
-    
+
+    workspaces.forEach(w => { w.isActive = false; });
+
     const workspace = workspaces.find(w => w.id === id);
-    
+
     if (!workspace) {
-      return {
-        success: false,
-        error: 'Workspace not found',
-      };
+      return { success: false, error: 'Workspace not found' };
     }
-    
+
     workspace.isActive = isActive;
     workspace.lastUsedAt = Date.now();
-    
+
     const success = await setLocal(STORAGE_KEYS.WORKSPACES, workspaces);
-    
+
     return {
       success,
       data: workspace,
@@ -358,10 +307,22 @@ export const setWorkspaceActive = async (
     };
   } catch (error) {
     console.error('Error setting workspace active:', error);
-    return {
-      success: false,
-      error: 'Failed to set workspace active',
-    };
+    return { success: false, error: 'Failed to set workspace active' };
+  }
+};
+
+/**
+ * Update the lastUsedAt timestamp on a workspace without a full save.
+ */
+export const updateWorkspaceLastUsed = async (id: string): Promise<void> => {
+  try {
+    const workspaces = await getWorkspaces();
+    const updated = workspaces.map(w =>
+      w.id === id ? { ...w, lastUsedAt: Date.now() } : w
+    );
+    await setLocal(STORAGE_KEYS.WORKSPACES, updated);
+  } catch (err) {
+    console.error('[FocusFlow] Failed to update workspace lastUsedAt:', err);
   }
 };
 
@@ -371,8 +332,6 @@ export const setWorkspaceActive = async (
 
 /**
  * Gets all tabs from storage
- * 
- * @returns Promise with array of tabs
  */
 export const getTabs = async (): Promise<Tab[]> => {
   const tabs = await getLocal(STORAGE_KEYS.TABS);
@@ -380,10 +339,52 @@ export const getTabs = async (): Promise<Tab[]> => {
 };
 
 /**
+ * Get all tabs stored across all workspaces (flat array).
+ */
+export const getAllTabs = async (): Promise<Tab[]> => {
+  try {
+    const workspaces = await getWorkspaces();
+    return workspaces.flatMap(w => w.tabs ?? []);
+  } catch (err) {
+    console.error('[FocusFlow] Failed to get all tabs:', err);
+    return [];
+  }
+};
+
+/**
+ * Finds which workspace a tab belongs to, matched by tab ID.
+ * Returns null if the tab is not in any workspace.
+ *
+ * @param tabId - Chrome tab ID to search for
+ */
+export const findWorkspaceByTab = async (tabId: number): Promise<Workspace | null> => {
+  const workspaces = await getWorkspaces();
+  return workspaces.find(w => w.tabs.some(t => t.id === tabId)) || null;
+};
+
+/**
+ * Gets a single tab by its Chrome tab ID.
+ * Returns null if not found.
+ *
+ * @param tabId - Chrome tab ID
+ */
+export const getTab = async (tabId: number): Promise<Tab | null> => {
+  const tabs = await getTabs();
+  return tabs.find(t => t.id === tabId) || null;
+};
+
+/**
+ * Saves a single tab, updating it if it exists or adding it if new.
+ * Alias used by the background worker.
+ *
+ * @param tab - Tab to save
+ */
+export const saveTab = async (tab: Tab): Promise<boolean> => {
+  return await addTab(tab);
+};
+
+/**
  * Saves tabs to storage
- * 
- * @param tabs - Array of tabs to save
- * @returns Promise with operation result
  */
 export const saveTabs = async (tabs: Tab[]): Promise<boolean> => {
   return await setLocal(STORAGE_KEYS.TABS, tabs);
@@ -391,45 +392,30 @@ export const saveTabs = async (tabs: Tab[]): Promise<boolean> => {
 
 /**
  * Adds a tab to storage
- * 
- * @param tab - Tab to add
- * @returns Promise with operation result
  */
 export const addTab = async (tab: Tab): Promise<boolean> => {
   const tabs = await getTabs();
-  
-  // Check if tab already exists (by ID)
   const existingIndex = tabs.findIndex(t => t.id === tab.id);
-  
+
   if (existingIndex !== -1) {
-    // Update existing tab
     tabs[existingIndex] = tab;
   } else {
-    // Add new tab
     tabs.push(tab);
   }
-  
+
   return await saveTabs(tabs);
 };
 
 /**
  * Removes a tab from storage
- * 
- * @param tabId - Chrome tab ID
- * @returns Promise with operation result
  */
 export const removeTab = async (tabId: number): Promise<boolean> => {
   const tabs = await getTabs();
-  const updatedTabs = tabs.filter(t => t.id !== tabId);
-  return await saveTabs(updatedTabs);
+  return await saveTabs(tabs.filter(t => t.id !== tabId));
 };
 
 /**
  * Updates a tab's importance flag
- * 
- * @param tabId - Chrome tab ID
- * @param isImportant - New importance state
- * @returns Promise with operation result
  */
 export const toggleTabImportance = async (
   tabId: number,
@@ -437,11 +423,9 @@ export const toggleTabImportance = async (
 ): Promise<boolean> => {
   const tabs = await getTabs();
   const tab = tabs.find(t => t.id === tabId);
-  
-  if (!tab) {
-    return false;
-  }
-  
+
+  if (!tab) return false;
+
   tab.isImportant = isImportant;
   return await saveTabs(tabs);
 };
@@ -452,42 +436,23 @@ export const toggleTabImportance = async (
 
 /**
  * Gets user settings from sync storage
- * 
- * @returns Promise with user settings (returns defaults if not found)
  */
 export const getSettings = async (): Promise<UserSettings> => {
   const settings = await getSync(STORAGE_KEYS.SETTINGS);
-  
-  // Return default settings if none exist
-  if (!settings) {
-    return { ...DEFAULT_SETTINGS };
-  }
-  
-  // Merge with defaults to ensure all properties exist
-  return {
-    ...DEFAULT_SETTINGS,
-    ...settings,
-  };
+  return settings ? { ...DEFAULT_SETTINGS, ...settings } : { ...DEFAULT_SETTINGS };
 };
 
 /**
  * Updates user settings in sync storage
- * 
- * @param settings - Partial settings to update
- * @returns Promise with operation result
  */
 export const updateSettings = async (
   settings: Partial<UserSettings>
 ): Promise<StorageResult<UserSettings>> => {
   try {
     const currentSettings = await getSettings();
-    const updatedSettings = {
-      ...currentSettings,
-      ...settings,
-    };
-    
+    const updatedSettings = { ...currentSettings, ...settings };
     const success = await setSync(STORAGE_KEYS.SETTINGS, updatedSettings);
-    
+
     return {
       success,
       data: updatedSettings,
@@ -495,22 +460,17 @@ export const updateSettings = async (
     };
   } catch (error) {
     console.error('Error updating settings:', error);
-    return {
-      success: false,
-      error: 'An error occurred while updating settings',
-    };
+    return { success: false, error: 'An error occurred while updating settings' };
   }
 };
 
 /**
  * Resets settings to defaults
- * 
- * @returns Promise with operation result
  */
 export const resetSettings = async (): Promise<StorageResult<UserSettings>> => {
   try {
     const success = await setSync(STORAGE_KEYS.SETTINGS, { ...DEFAULT_SETTINGS });
-    
+
     return {
       success,
       data: { ...DEFAULT_SETTINGS },
@@ -518,10 +478,7 @@ export const resetSettings = async (): Promise<StorageResult<UserSettings>> => {
     };
   } catch (error) {
     console.error('Error resetting settings:', error);
-    return {
-      success: false,
-      error: 'An error occurred while resetting settings',
-    };
+    return { success: false, error: 'An error occurred while resetting settings' };
   }
 };
 
@@ -531,8 +488,6 @@ export const resetSettings = async (): Promise<StorageResult<UserSettings>> => {
 
 /**
  * Gets workspace suggestions from storage
- * 
- * @returns Promise with array of suggestions
  */
 export const getSuggestions = async (): Promise<WorkspaceSuggestion[]> => {
   const suggestions = await getLocal(STORAGE_KEYS.SUGGESTIONS);
@@ -541,9 +496,6 @@ export const getSuggestions = async (): Promise<WorkspaceSuggestion[]> => {
 
 /**
  * Saves workspace suggestions
- * 
- * @param suggestions - Array of suggestions
- * @returns Promise with operation result
  */
 export const saveSuggestions = async (
   suggestions: WorkspaceSuggestion[]
@@ -552,26 +504,32 @@ export const saveSuggestions = async (
 };
 
 /**
- * Adds a new suggestion
- * 
- * @param suggestion - Suggestion to add
- * @returns Promise with operation result
+ * Adds a single new suggestion (limits to 5 most recent).
  */
 export const addSuggestion = async (
   suggestion: WorkspaceSuggestion
 ): Promise<boolean> => {
   const suggestions = await getSuggestions();
-  
-  // Limit to 5 most recent suggestions
-  const updatedSuggestions = [suggestion, ...suggestions].slice(0, 5);
-  
-  return await saveSuggestions(updatedSuggestions);
+  return await saveSuggestions([suggestion, ...suggestions].slice(0, 5));
+};
+
+/**
+ * Alias used by the background worker — saves one suggestion to storage.
+ * Keeps last 10 suggestions to allow the popup to display recent ones.
+ */
+export const saveWorkspaceSuggestion = async (
+  suggestion: WorkspaceSuggestion
+): Promise<void> => {
+  try {
+    const suggestions = await getSuggestions();
+    await saveSuggestions([suggestion, ...suggestions].slice(0, 10));
+  } catch (err) {
+    console.error('[FocusFlow] Failed to save workspace suggestion:', err);
+  }
 };
 
 /**
  * Clears all suggestions
- * 
- * @returns Promise with operation result
  */
 export const clearSuggestions = async (): Promise<boolean> => {
   return await setLocal(STORAGE_KEYS.SUGGESTIONS, []);
@@ -583,8 +541,6 @@ export const clearSuggestions = async (): Promise<boolean> => {
 
 /**
  * Gets archived workspaces
- * 
- * @returns Promise with array of archived workspaces
  */
 export const getArchivedWorkspaces = async (): Promise<Workspace[]> => {
   const archived = await getLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES);
@@ -593,9 +549,6 @@ export const getArchivedWorkspaces = async (): Promise<Workspace[]> => {
 
 /**
  * Restores an archived workspace
- * 
- * @param id - Workspace ID to restore
- * @returns Promise with operation result
  */
 export const restoreArchivedWorkspace = async (
   id: string
@@ -603,58 +556,52 @@ export const restoreArchivedWorkspace = async (
   try {
     const archived = await getArchivedWorkspaces();
     const workspace = archived.find(w => w.id === id);
-    
+
     if (!workspace) {
-      return {
-        success: false,
-        error: 'Archived workspace not found',
-      };
+      return { success: false, error: 'Archived workspace not found' };
     }
-    
-    // Remove from archived
-    const updatedArchived = archived.filter(w => w.id !== id);
-    await setLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES, updatedArchived);
-    
-    // Add back to active workspaces
+
+    await setLocal(
+      STORAGE_KEYS.ARCHIVED_WORKSPACES,
+      archived.filter(w => w.id !== id)
+    );
+
     return await saveWorkspace(workspace);
   } catch (error) {
     console.error('Error restoring archived workspace:', error);
-    return {
-      success: false,
-      error: 'Failed to restore archived workspace',
-    };
+    return { success: false, error: 'Failed to restore archived workspace' };
   }
 };
 
 /**
- * Permanently deletes old archived workspaces
- * 
- * @param retentionDays - Number of days to keep archives (default: 30)
- * @returns Promise with number of deleted workspaces
+ * Permanently deletes old archived workspaces past the retention window.
  */
 export const cleanOldArchives = async (
   retentionDays: number = 30
 ): Promise<number> => {
   try {
     const archived = await getArchivedWorkspaces();
-    const cutoffTime = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
-    
-    // Keep only recent archives
-    const recentArchives = archived.filter(
-      w => w.lastUsedAt > cutoffTime
-    );
-    
-    const deletedCount = archived.length - recentArchives.length;
-    
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    const recent = archived.filter(w => w.lastUsedAt > cutoff);
+    const deletedCount = archived.length - recent.length;
+
     if (deletedCount > 0) {
-      await setLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES, recentArchives);
+      await setLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES, recent);
     }
-    
+
     return deletedCount;
   } catch (error) {
     console.error('Error cleaning old archives:', error);
     return 0;
   }
+};
+
+/**
+ * Alias used by background worker scheduled alarm cleanup.
+ * Removes workspaces soft-deleted more than 30 days ago.
+ */
+export const cleanupOldWorkspaces = async (): Promise<void> => {
+  await cleanOldArchives(30);
 };
 
 // =============================================================================
@@ -663,8 +610,6 @@ export const cleanOldArchives = async (
 
 /**
  * Gets the last sync timestamp
- * 
- * @returns Promise with timestamp or null if never synced
  */
 export const getLastSyncTime = async (): Promise<number | null> => {
   return await getLocal(STORAGE_KEYS.LAST_SYNC);
@@ -672,8 +617,6 @@ export const getLastSyncTime = async (): Promise<number | null> => {
 
 /**
  * Updates the last sync timestamp
- * 
- * @returns Promise with operation result
  */
 export const updateLastSyncTime = async (): Promise<boolean> => {
   return await setLocal(STORAGE_KEYS.LAST_SYNC, Date.now());
@@ -685,8 +628,6 @@ export const updateLastSyncTime = async (): Promise<boolean> => {
 
 /**
  * Gets all storage data at once (for backup/export)
- * 
- * @returns Promise with all storage data
  */
 export const getAllData = async (): Promise<{
   workspaces: Workspace[];
@@ -702,23 +643,13 @@ export const getAllData = async (): Promise<{
     getArchivedWorkspaces(),
     getSuggestions(),
   ]);
-  
-  return {
-    workspaces,
-    tabs,
-    settings,
-    archived,
-    suggestions,
-  };
+
+  return { workspaces, tabs, settings, archived, suggestions };
 };
 
 /**
  * Imports data (for restore from backup)
- * 
  * WARNING: This will overwrite all existing data!
- * 
- * @param data - Data to import
- * @returns Promise with operation result
  */
 export const importAllData = async (data: {
   workspaces?: Workspace[];
@@ -729,47 +660,25 @@ export const importAllData = async (data: {
 }): Promise<StorageResult<void>> => {
   try {
     const operations: Promise<boolean>[] = [];
-    
-    if (data.workspaces) {
-      operations.push(setLocal(STORAGE_KEYS.WORKSPACES, data.workspaces));
-    }
-    
-    if (data.tabs) {
-      operations.push(setLocal(STORAGE_KEYS.TABS, data.tabs));
-    }
-    
-    if (data.settings) {
-      operations.push(setSync(STORAGE_KEYS.SETTINGS, data.settings));
-    }
-    
-    if (data.archived) {
-      operations.push(setLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES, data.archived));
-    }
-    
-    if (data.suggestions) {
-      operations.push(setLocal(STORAGE_KEYS.SUGGESTIONS, data.suggestions));
-    }
-    
+
+    if (data.workspaces) operations.push(setLocal(STORAGE_KEYS.WORKSPACES, data.workspaces));
+    if (data.tabs)       operations.push(setLocal(STORAGE_KEYS.TABS, data.tabs));
+    if (data.settings)   operations.push(setSync(STORAGE_KEYS.SETTINGS, data.settings));
+    if (data.archived)   operations.push(setLocal(STORAGE_KEYS.ARCHIVED_WORKSPACES, data.archived));
+    if (data.suggestions) operations.push(setLocal(STORAGE_KEYS.SUGGESTIONS, data.suggestions));
+
     const results = await Promise.all(operations);
     const success = results.every(r => r === true);
-    
-    return {
-      success,
-      error: success ? undefined : 'Some data failed to import',
-    };
+
+    return { success, error: success ? undefined : 'Some data failed to import' };
   } catch (error) {
     console.error('Error importing data:', error);
-    return {
-      success: false,
-      error: 'An error occurred during import',
-    };
+    return { success: false, error: 'An error occurred during import' };
   }
 };
 
 /**
  * Exports all data as JSON string (for user download)
- * 
- * @returns Promise with JSON string
  */
 export const exportDataAsJson = async (): Promise<string> => {
   const data = await getAllData();
@@ -778,9 +687,6 @@ export const exportDataAsJson = async (): Promise<string> => {
 
 /**
  * Imports data from JSON string
- * 
- * @param jsonString - JSON string to import
- * @returns Promise with operation result
  */
 export const importDataFromJson = async (
   jsonString: string
@@ -790,10 +696,32 @@ export const importDataFromJson = async (
     return await importAllData(data);
   } catch (error) {
     console.error('Error parsing JSON:', error);
-    return {
-      success: false,
-      error: 'Invalid JSON data',
-    };
+    return { success: false, error: 'Invalid JSON data' };
+  }
+};
+
+// =============================================================================
+// INITIALISATION & CLEANUP
+// =============================================================================
+
+/**
+ * Initialize storage with default values on first install.
+ * Called by the background service worker on chrome.runtime.onInstalled.
+ * Safe to call multiple times — only writes if values don't already exist.
+ */
+export const initializeStorage = async (): Promise<void> => {
+  try {
+    const workspaces = await getWorkspaces();
+    const settings   = await getSettings();
+
+    if (!workspaces.length) {
+      await setLocal(STORAGE_KEYS.WORKSPACES, []);
+    }
+
+    // Settings always merges with defaults, so just ensure the key exists
+    await setSync(STORAGE_KEYS.SETTINGS, settings);
+  } catch (err) {
+    console.error('[FocusFlow] Failed to initialize storage:', err);
   }
 };
 
@@ -803,8 +731,6 @@ export const importDataFromJson = async (
 
 /**
  * Gets storage usage information
- * 
- * @returns Promise with storage usage in bytes
  */
 export const getStorageUsage = async (): Promise<{
   local: number;
@@ -814,37 +740,29 @@ export const getStorageUsage = async (): Promise<{
 }> => {
   try {
     const localBytes = await chrome.storage.local.getBytesInUse();
-    const syncBytes = await chrome.storage.sync.getBytesInUse();
-    
+    const syncBytes  = await chrome.storage.sync.getBytesInUse();
+
     const formatBytes = (bytes: number): string => {
-      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024)    return `${bytes} B`;
       if (bytes < 1048576) return `${(bytes / 1024).toFixed(2)} KB`;
       return `${(bytes / 1048576).toFixed(2)} MB`;
     };
-    
+
     return {
       local: localBytes,
       sync: syncBytes,
       localFormatted: formatBytes(localBytes),
-      syncFormatted: formatBytes(syncBytes),
+      syncFormatted:  formatBytes(syncBytes),
     };
   } catch (error) {
     console.error('Error getting storage usage:', error);
-    return {
-      local: 0,
-      sync: 0,
-      localFormatted: '0 B',
-      syncFormatted: '0 B',
-    };
+    return { local: 0, sync: 0, localFormatted: '0 B', syncFormatted: '0 B' };
   }
 };
 
 /**
- * Clears all storage (for debugging or reset)
- * 
- * WARNING: This deletes everything! Use with caution!
- * 
- * @returns Promise with operation result
+ * Clears all storage (for debugging or reset).
+ * WARNING: Deletes everything!
  */
 export const clearAllStorage = async (): Promise<StorageResult<void>> => {
   try {
@@ -852,14 +770,10 @@ export const clearAllStorage = async (): Promise<StorageResult<void>> => {
       chrome.storage.local.clear(),
       chrome.storage.sync.clear(),
     ]);
-    
     return { success: true };
   } catch (error) {
     console.error('Error clearing storage:', error);
-    return {
-      success: false,
-      error: 'Failed to clear storage',
-    };
+    return { success: false, error: 'Failed to clear storage' };
   }
 };
 
@@ -868,18 +782,8 @@ export const clearAllStorage = async (): Promise<StorageResult<void>> => {
 // =============================================================================
 
 /**
- * Listens for changes to a specific storage key
- * 
- * @param key - Storage key to watch
- * @param callback - Function to call when key changes
- * @returns Function to remove the listener
- * 
- * @example
- * const unsubscribe = onStorageChange(STORAGE_KEYS.WORKSPACES, (newValue) => {
- *   console.log('Workspaces updated:', newValue);
- * });
- * 
- * // Later: unsubscribe();
+ * Listens for changes to a specific storage key.
+ * Returns an unsubscribe function.
  */
 export const onStorageChange = <T>(
   key: string,
@@ -887,74 +791,68 @@ export const onStorageChange = <T>(
 ): (() => void) => {
   const listener = (
     changes: { [key: string]: chrome.storage.StorageChange },
-    areaName: string
+    _areaName: string
   ) => {
     if (changes[key]) {
       callback(changes[key].newValue || null, changes[key].oldValue || null);
     }
   };
-  
+
   chrome.storage.onChanged.addListener(listener);
-  
-  // Return unsubscribe function
-  return () => {
-    chrome.storage.onChanged.removeListener(listener);
-  };
+  return () => chrome.storage.onChanged.removeListener(listener);
+};
+
+/**
+ * Deletes a tab from storage by its Chrome tab ID.
+ * Alias used by the background worker.
+ */
+export const deleteTab = async (tabId: number): Promise<boolean> => {
+  return await removeTab(tabId);
 };
 
 // =============================================================================
-// EXPORTS
+// CONVENIENCE OBJECT EXPORT
 // =============================================================================
 
-/**
- * Export all storage functions as a single object
- */
 export const storage = {
-  // Workspaces
   getWorkspaces,
   getWorkspaceById,
+  getWorkspace,
   saveWorkspace,
   deleteWorkspace,
   updateWorkspaceTabs,
   setWorkspaceActive,
-  
-  // Tabs
+  updateWorkspaceLastUsed,
   getTabs,
+  getAllTabs,
   saveTabs,
   addTab,
   removeTab,
   toggleTabImportance,
-  
-  // Settings
   getSettings,
   updateSettings,
   resetSettings,
-  
-  // Suggestions
   getSuggestions,
   saveSuggestions,
   addSuggestion,
+  saveWorkspaceSuggestion,
   clearSuggestions,
-  
-  // Archives
   getArchivedWorkspaces,
   restoreArchivedWorkspace,
   cleanOldArchives,
-  
-  // Sync
+  cleanupOldWorkspaces,
   getLastSyncTime,
   updateLastSyncTime,
-  
-  // Batch
   getAllData,
   importAllData,
   exportDataAsJson,
   importDataFromJson,
-  
-  // Info
+  initializeStorage,
   getStorageUsage,
   clearAllStorage,
-  
-  // Events
   onStorageChange,
+  getTab,
+  saveTab,
+  deleteTab,
+  findWorkspaceByTab,
 };

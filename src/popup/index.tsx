@@ -1,363 +1,214 @@
-/**
- * FocusFlow Popup UI - Main Entry Point
- * 
- * The primary user interface shown when clicking the extension icon.
- * Displays active tabs and workspace library in a clean, minimalist design.
- * 
- * Dimensions: 400px (width) × 600px (height)
- * Theme: Dark mode by default with black & white aesthetic
- * 
- * @module popup/index
- */
+import React, { useState, useEffect, useCallback } from "react";
+import { Layout, BookOpen } from "lucide-react";
 
-import React, { useState, useEffect } from 'react';
-import { LayoutGrid, Folder, Settings, Menu } from 'lucide-react';
-import type { Workspace } from '../types/workspace';
-import type { UserSettings } from '../types/settings';
+import Header          from "./components/Header";
+import ActiveSession   from "./components/ActiveSession";
+import WorkspaceLibrary from "./components/WorkspaceLibrary";
+import PaywallModal    from "./components/PaywallModal";
 
-/**
- * View types for tab navigation
- */
-type ViewType = 'active' | 'workspaces';
+import { getSettings }   from "../lib/storage";
+import { isPremiumUser } from "../lib/supabase";
+
+import "../../styles/globals.css"; // Tailwind base styles
+
+// ─────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────
+
+/** The two navigable views inside the popup. */
+type ActiveView = "session" | "library";
 
 /**
- * Main Popup Component
- * Entry point for the extension popup UI
+ * Shape used when the PaywallModal is requested.
+ * featureName is shown as context inside the modal
+ * (e.g. "Cloud Sync", "AI Auto-Grouping").
  */
-function FocusFlowPopup() {
-  // State management
-  const [currentView, setCurrentView] = useState<ViewType>('active');
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [settings, setSettings] = useState<UserSettings | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+interface PaywallRequest {
+  featureName: string;
+}
 
-  // Load initial data on mount
+// ─────────────────────────────────────────────
+// Nav tab configuration
+// Centralised so adding a future third tab
+// only requires adding an entry here.
+// ─────────────────────────────────────────────
+const NAV_TABS: {
+  id: ActiveView;
+  label: string;
+  Icon: React.FC<{ size: number; strokeWidth: number }>;
+}[] = [
+  { id: "session", label: "Active",     Icon: Layout   },
+  { id: "library", label: "Workspaces", Icon: BookOpen },
+];
+
+// ─────────────────────────────────────────────
+// Root popup component
+// ─────────────────────────────────────────────
+const IndexPopup: React.FC = () => {
+  // ── State ──────────────────────────────────
+  const [activeView, setActiveView] = useState<ActiveView>("session");
+  const [isPremium, setIsPremium]   = useState<boolean>(false);
+
+  /**
+   * When set, PaywallModal renders as a full-screen overlay.
+   * Reset to null when the user closes the modal.
+   */
+  const [paywallRequest, setPaywallRequest] = useState<PaywallRequest | null>(null);
+
+  // ── Load premium status on mount ──────────
   useEffect(() => {
-    loadInitialData();
+    /**
+     * Check premium status from two sources and take the most generous result:
+     * 1. Local settings cache (fast, works offline)
+     * 2. Supabase live check (authoritative, requires network)
+     *
+     * We load the local cache first so the UI is never blocked, then
+     * overwrite with the live result once it arrives.
+     */
+    const loadPremiumStatus = async () => {
+      try {
+        // Fast path: local settings cache
+        const settings = await getSettings();
+        setIsPremium(settings.isPremium ?? false);
+
+        // Authoritative path: Supabase check
+        const liveStatus = await isPremiumUser();
+        setIsPremium(liveStatus);
+      } catch {
+        // Network unavailable — fall back to cached value already set above
+      }
+    };
+
+    loadPremiumStatus();
   }, []);
 
+  // ── Paywall gate ───────────────────────────
   /**
-   * Load workspaces and settings from background worker
+   * Called by any child component that guards a premium feature.
+   * If the user is premium the callback is executed immediately.
+   * If not, the PaywallModal is shown instead.
+   *
+   * @param featureName - Human-readable name shown inside the modal
+   * @param onUnlocked  - Callback to run if/when the user is premium
    */
-  const loadInitialData = async () => {
-    try {
-      setIsLoading(true);
-      setError(null);
-
-      // Request workspaces from background worker
-      const workspacesResponse = await chrome.runtime.sendMessage({
-        action: 'GET_WORKSPACES'
-      });
-
-      // Request settings from background worker
-      const settingsResponse = await chrome.runtime.sendMessage({
-        action: 'GET_SETTINGS'
-      });
-
-      if (workspacesResponse.success) {
-        setWorkspaces(workspacesResponse.data || []);
+  const handlePremiumGate = useCallback(
+    (featureName: string, onUnlocked?: () => void) => {
+      if (isPremium) {
+        onUnlocked?.();
+      } else {
+        setPaywallRequest({ featureName });
       }
+    },
+    [isPremium]
+  );
 
-      if (settingsResponse.success) {
-        setSettings(settingsResponse.data);
-      }
+  /** Dismiss the paywall modal. */
+  const handleClosePaywall = useCallback(() => {
+    setPaywallRequest(null);
+  }, []);
 
-    } catch (err) {
-      console.error('Failed to load data:', err);
-      setError('Failed to load data. Please try again.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  /**
-   * Refresh data manually
-   */
-  const handleRefresh = () => {
-    loadInitialData();
-  };
-
+  // ─────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────
   return (
-    <div className="w-[400px] h-[600px] bg-[#0A0A0A] text-white flex flex-col overflow-hidden">
-      {/* Header */}
-      <header className="bg-[#1A1A1A] border-b border-[#2A2A2A] px-4 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-[#3B82F6] rounded-lg flex items-center justify-center">
-            <LayoutGrid size={20} className="text-white" />
-          </div>
-          <div>
-            <h1 className="text-sm font-semibold">FocusFlow</h1>
-            <p className="text-xs text-gray-400">Tab Manager</p>
-          </div>
+    /*
+     * Popup dimensions: 400 × 580px — standard for Chrome extensions.
+     * `relative` is required so PaywallModal's `absolute inset-0`
+     * is scoped to this container, not the browser viewport.
+     */
+    <div
+      className="
+        relative flex flex-col
+        w-[400px] h-[580px]
+        bg-neutral-950 text-neutral-100
+        overflow-hidden select-none
+      "
+    >
+      {/* ── Header ──────────────────────────── */}
+      <Header
+        isPremium={isPremium}
+        onUpgradeClick={() => setPaywallRequest({ featureName: "Premium" })}
+      />
+
+      {/* ── Main view area ──────────────────── */}
+      <main className="flex-1 min-h-0 overflow-hidden relative">
+        {/*
+         * Both views are always mounted but only one is visible.
+         * This keeps WorkspaceLibrary's loaded state alive when
+         * the user switches back and forth — avoiding a re-fetch
+         * every time they tab between views.
+         */}
+        <div
+          className={`absolute inset-0 ${activeView === "session" ? "block" : "hidden"}`}
+          aria-hidden={activeView !== "session"}
+        >
+          <ActiveSession />
         </div>
 
-        {/* Settings button */}
-        <button
-          onClick={() => {/* TODO: Open settings modal */}}
-          className="p-2 hover:bg-[#2A2A2A] rounded-lg transition-colors"
-          aria-label="Settings"
+        <div
+          className={`absolute inset-0 ${activeView === "library" ? "block" : "hidden"}`}
+          aria-hidden={activeView !== "library"}
         >
-          <Settings size={18} className="text-gray-400" />
-        </button>
-      </header>
-
-      {/* Tab Navigation */}
-      <nav className="bg-[#0A0A0A] border-b border-[#2A2A2A] px-4 flex gap-1">
-        <button
-          onClick={() => setCurrentView('active')}
-          className={`
-            flex-1 py-3 text-sm font-medium transition-all
-            ${currentView === 'active' 
-              ? 'text-white border-b-2 border-[#3B82F6]' 
-              : 'text-gray-400 hover:text-gray-300'
-            }
-          `}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <Menu size={16} />
-            Active Tabs
-          </div>
-        </button>
-
-        <button
-          onClick={() => setCurrentView('workspaces')}
-          className={`
-            flex-1 py-3 text-sm font-medium transition-all
-            ${currentView === 'workspaces' 
-              ? 'text-white border-b-2 border-[#3B82F6]' 
-              : 'text-gray-400 hover:text-gray-300'
-            }
-          `}
-        >
-          <div className="flex items-center justify-center gap-2">
-            <Folder size={16} />
-            Workspaces ({workspaces.length})
-          </div>
-        </button>
-      </nav>
-
-      {/* Main Content Area */}
-      <main className="flex-1 overflow-y-auto">
-        {isLoading ? (
-          <LoadingState />
-        ) : error ? (
-          <ErrorState message={error} onRetry={handleRefresh} />
-        ) : (
-          <>
-            {currentView === 'active' ? (
-              <ActiveSessionPlaceholder />
-            ) : (
-              <WorkspaceLibraryPlaceholder workspaces={workspaces} />
-            )}
-          </>
-        )}
+          <WorkspaceLibrary />
+        </div>
       </main>
 
-      {/* Footer - Memory Stats */}
-      {!isLoading && !error && (
-        <footer className="bg-[#1A1A1A] border-t border-[#2A2A2A] px-4 py-2">
-          <MemoryStats />
-        </footer>
+      {/* ── Bottom navigation bar ───────────── */}
+      <nav
+        className="
+          flex items-center border-t border-neutral-800/60
+          bg-neutral-950 flex-shrink-0
+        "
+        aria-label="Main navigation"
+      >
+        {NAV_TABS.map(({ id, label, Icon }) => {
+          const isActive = activeView === id;
+          return (
+            <button
+              key={id}
+              onClick={() => setActiveView(id)}
+              aria-current={isActive ? "page" : undefined}
+              aria-label={`Switch to ${label} view`}
+              className={`
+                flex-1 flex flex-col items-center justify-center
+                gap-0.5 py-2.5 transition-colors
+                ${isActive
+                  ? "text-blue-400"
+                  : "text-neutral-600 hover:text-neutral-400"
+                }
+              `}
+            >
+              <Icon size={15} strokeWidth={isActive ? 2.5 : 1.8} />
+              <span
+                className={`
+                  text-[10px] font-medium
+                  ${isActive ? "text-blue-400" : "text-neutral-600"}
+                `}
+              >
+                {label}
+              </span>
+
+              {/* Active indicator dot */}
+              {isActive && (
+                <span
+                  className="w-1 h-1 rounded-full bg-blue-400 mt-0.5"
+                  aria-hidden
+                />
+              )}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* ── Paywall modal overlay ────────────── */}
+      {paywallRequest && (
+        <PaywallModal
+          featureName={paywallRequest.featureName}
+          onClose={handleClosePaywall}
+        />
       )}
     </div>
   );
-}
+};
 
-/**
- * Loading skeleton component
- */
-function LoadingState() {
-  return (
-    <div className="p-4 space-y-4">
-      <div className="animate-pulse space-y-3">
-        {/* Skeleton items */}
-        {[1, 2, 3, 4, 5].map((i) => (
-          <div key={i} className="flex items-center gap-3 p-3 bg-[#1A1A1A] rounded-lg">
-            <div className="w-8 h-8 bg-[#2A2A2A] rounded"></div>
-            <div className="flex-1 space-y-2">
-              <div className="h-4 bg-[#2A2A2A] rounded w-3/4"></div>
-              <div className="h-3 bg-[#2A2A2A] rounded w-1/2"></div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Error state component
- */
-function ErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
-  return (
-    <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-      <div className="w-16 h-16 bg-red-500/10 rounded-full flex items-center justify-center mb-4">
-        <span className="text-3xl">⚠️</span>
-      </div>
-      <h3 className="text-lg font-semibold mb-2">Something went wrong</h3>
-      <p className="text-sm text-gray-400 mb-4">{message}</p>
-      <button
-        onClick={onRetry}
-        className="px-4 py-2 bg-[#3B82F6] hover:bg-[#2563EB] rounded-lg text-sm font-medium transition-colors"
-      >
-        Try Again
-      </button>
-    </div>
-  );
-}
-
-/**
- * Placeholder for Active Session view (will be replaced with actual component)
- */
-function ActiveSessionPlaceholder() {
-  const [tabCount, setTabCount] = useState(0);
-
-  useEffect(() => {
-    chrome.tabs.query({ currentWindow: true }, (tabs) => {
-      setTabCount(tabs.length);
-    });
-  }, []);
-
-  return (
-    <div className="p-4">
-      <div className="bg-[#1A1A1A] border border-[#2A2A2A] rounded-lg p-8 text-center">
-        <div className="w-16 h-16 bg-[#3B82F6]/10 rounded-full flex items-center justify-center mx-auto mb-4">
-          <Menu size={32} className="text-[#3B82F6]" />
-        </div>
-        <h3 className="text-lg font-semibold mb-2">Active Session</h3>
-        <p className="text-sm text-gray-400 mb-4">
-          You have {tabCount} tab{tabCount !== 1 ? 's' : ''} open
-        </p>
-        <p className="text-xs text-gray-500">
-          Coming soon: See all your active tabs here
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Placeholder for Workspace Library view (will be replaced with actual component)
- */
-function WorkspaceLibraryPlaceholder({ workspaces }: { workspaces: Workspace[] }) {
-  if (workspaces.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-        <div className="w-16 h-16 bg-[#3B82F6]/10 rounded-full flex items-center justify-center mb-4">
-          <Folder size={32} className="text-[#3B82F6]" />
-        </div>
-        <h3 className="text-lg font-semibold mb-2">No workspaces yet</h3>
-        <p className="text-sm text-gray-400 mb-4">
-          Create your first workspace to get started organizing your tabs
-        </p>
-        <button className="px-4 py-2 bg-[#3B82F6] hover:bg-[#2563EB] rounded-lg text-sm font-medium transition-colors">
-          Create Workspace
-        </button>
-      </div>
-    );
-  }
-
-  return (
-    <div className="p-4 space-y-3">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-semibold text-gray-400">Your Workspaces</h3>
-        <button className="text-xs text-[#3B82F6] hover:text-[#2563EB] font-medium">
-          + New
-        </button>
-      </div>
-
-      {workspaces.map((workspace) => (
-        <div
-          key={workspace.id}
-          className="bg-[#1A1A1A] border border-[#2A2A2A] rounded-lg p-4 hover:border-[#3B82F6]/30 transition-colors cursor-pointer"
-        >
-          <div className="flex items-start justify-between mb-2">
-            <div className="flex items-center gap-2">
-              {workspace.icon && <span className="text-lg">{workspace.icon}</span>}
-              <h4 className="font-medium">{workspace.name}</h4>
-            </div>
-            <span className="text-xs text-gray-500">
-              {workspace.tabs.length} tabs
-            </span>
-          </div>
-          <p className="text-xs text-gray-400">
-            {workspace.isPaused ? '⏸️ Paused' : '▶️ Active'} • 
-            Last used {formatRelativeTime(workspace.lastUsedAt)}
-          </p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/**
- * Memory stats footer component
- */
-function MemoryStats() {
-  const [stats, setStats] = useState({ memorySavedMB: 0, pausedTabs: 0 });
-
-  useEffect(() => {
-    // Request memory stats from background worker
-    chrome.runtime.sendMessage({ action: 'GET_MEMORY_STATS' })
-      .then(response => {
-        if (response.success) {
-          setStats({
-            memorySavedMB: response.data.memorySavedMB,
-            pausedTabs: response.data.pausedTabs
-          });
-        }
-      })
-      .catch(console.error);
-  }, []);
-
-  if (stats.pausedTabs === 0) {
-    return (
-      <p className="text-xs text-gray-400 text-center">
-        💡 Pause workspaces to save memory
-      </p>
-    );
-  }
-
-  return (
-    <div className="flex items-center justify-center gap-2 text-xs">
-      <span className="text-gray-400">💾</span>
-      <span className="text-gray-300">
-        Saved <span className="font-semibold text-[#3B82F6]">
-          {formatMemory(stats.memorySavedMB)}
-        </span>
-      </span>
-      <span className="text-gray-500">•</span>
-      <span className="text-gray-400">
-        {stats.pausedTabs} tab{stats.pausedTabs !== 1 ? 's' : ''} paused
-      </span>
-    </div>
-  );
-}
-
-/**
- * Format memory size (MB/GB)
- */
-function formatMemory(mb: number): string {
-  if (mb >= 1024) {
-    return `${(mb / 1024).toFixed(1)} GB`;
-  }
-  return `${Math.round(mb)} MB`;
-}
-
-/**
- * Format relative time (e.g., "2 hours ago")
- */
-function formatRelativeTime(timestamp: number): string {
-  const seconds = Math.floor((Date.now() - timestamp) / 1000);
-
-  if (seconds < 60) return 'just now';
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d ago`;
-  
-  return new Date(timestamp).toLocaleDateString();
-}
-
-// Export as default for Plasmo framework
-export default FocusFlowPopup;
+export default IndexPopup;

@@ -6,7 +6,13 @@
  * 
  * @module constants
  */
-
+export const DEBUG = process.env.NODE_ENV === 'development';
+// Alarm names for chrome.alarms API
+export const ALARM_NAMES = {
+  CLEANUP:      'focusflow_cleanup',
+  SYNC:         'focusflow_sync',
+  MEMORY_CHECK: 'focusflow_memory_check',
+} as const;
 // =============================================================================
 // CHROME STORAGE KEYS
 // =============================================================================

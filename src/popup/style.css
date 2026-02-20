@@ -1,26 +1,220 @@
-/* Global popup styles */
+/*
+ * FocusFlow — Popup Stylesheet
+ * ─────────────────────────────────────────────
+ * File: src/popup/style.css
+ *
+ * Plasmo automatically detects and injects this file for the popup page.
+ * PostCSS + Tailwind process it at build time — no manual import needed.
+ *
+ * Contents:
+ *  1. Tailwind directives
+ *  2. Popup frame lock (400 × 580px)
+ *  3. Base resets for extension context
+ *  4. Custom scrollbar styles
+ *  5. PaywallModal slideUp animation
+ *  6. Focus ring overrides
+ *  7. Font smoothing
+ */
+
+
+/* ─────────────────────────────────────────────
+   1. TAILWIND DIRECTIVES
+   ───────────────────────────────────────────── */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+/* ─────────────────────────────────────────────
+   2. POPUP FRAME LOCK
+   Chrome renders the popup at whatever size the
+   root element requests. We lock it here so it
+   never collapses or overflows the browser frame.
+   ───────────────────────────────────────────── */
+html,
 body {
+  width: 400px;
+  height: 580px;
+  min-width: 400px;
+  min-height: 580px;
+  max-width: 400px;
+  max-height: 580px;
+  overflow: hidden;
   margin: 0;
   padding: 0;
+}
+
+#root {
   width: 400px;
-  height: 600px;
+  height: 580px;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Custom scrollbar */
+
+/* ─────────────────────────────────────────────
+   3. BASE RESETS FOR EXTENSION CONTEXT
+   Chrome extensions inherit some host-page styles.
+   These resets ensure a clean slate regardless of
+   which site the user is on when they click the icon.
+   ───────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  /* Prevent host-page font overrides bleeding in */
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
+}
+
+button {
+  /* Chrome applies a default cursor:default to buttons — override */
+  cursor: pointer;
+}
+
+/* Prevent text selection on interactive chrome (buttons, nav items) */
+button,
+nav,
+header {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Allow selection inside text content areas */
+main {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+
+/* ─────────────────────────────────────────────
+   4. CUSTOM SCROLLBAR STYLES
+   Applied to all overflow-y-auto containers in
+   the popup (tab list, workspace list).
+   Uses webkit pseudo-elements — works in Chrome.
+   ───────────────────────────────────────────── */
+
+/* Narrow scrollbar track so it doesn't eat into list width */
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 4px;
 }
 
+/* Transparent track — scrollbar only visible when scrolling */
 ::-webkit-scrollbar-track {
-  background: #0A0A0A;
+  background: transparent;
 }
 
+/* Thumb: muted neutral, rounds on both ends */
 ::-webkit-scrollbar-thumb {
-  background: #2A2A2A;
+  background-color: #2a2a2a;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background-clip: content-box;
+}
+
+/* Slightly brighter when hovered */
+::-webkit-scrollbar-thumb:hover {
+  background-color: #404040;
+}
+
+/* Hide the scrollbar corner (appears at scroll intersection) */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+
+/* ─────────────────────────────────────────────
+   5. PAYWALLMODAL — SLIDE UP ANIMATION
+   Registered here so Tailwind's arbitrary value
+   animate-[slideUp_200ms_ease-out] resolves
+   correctly at build time.
+   ───────────────────────────────────────────── */
+@keyframes slideUp {
+  from {
+    transform: translateY(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* Utility class — usable directly if needed */
+.animate-slide-up {
+  animation: slideUp 200ms ease-out forwards;
+}
+
+
+/* ─────────────────────────────────────────────
+   6. FOCUS RING OVERRIDES
+   Chrome's default focus ring can clash with the
+   dark background. We replace it with a consistent
+   blue ring that matches the accent colour.
+   ───────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
   border-radius: 4px;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #404040;
+/* Suppress focus ring on mouse clicks — only show for keyboard nav */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+
+/* ─────────────────────────────────────────────
+   7. FONT SMOOTHING
+   Improves text rendering on macOS / high-DPI
+   displays — matches the "sleek, professional"
+   design spec from the project brief.
+   ───────────────────────────────────────────── */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+
+/* ─────────────────────────────────────────────
+   8. TAILWIND COMPONENT LAYER EXTENSIONS
+   Small reusable patterns that appear across
+   multiple components but are too simple to
+   warrant their own React sub-components.
+   ───────────────────────────────────────────── */
+@layer components {
+
+  /* Consistent pill badge — used for Live/Paused/count badges */
+  .badge {
+    @apply inline-flex items-center gap-1
+           text-[9px] font-bold uppercase tracking-wider
+           px-1.5 py-0.5 rounded-full;
+  }
+
+  .badge-blue  { @apply text-blue-400  bg-blue-400/10;  }
+  .badge-green { @apply text-emerald-400 bg-emerald-400/10; }
+  .badge-amber { @apply text-amber-400 bg-amber-400/10; }
+
+  /* Icon button — small clickable icon with hover state */
+  .icon-btn {
+    @apply p-1.5 rounded-md transition-colors
+           text-neutral-600 hover:text-neutral-300
+           hover:bg-neutral-800;
+  }
+
+  /* Subtle divider line */
+  .divider {
+    @apply border-t border-neutral-800/60;
+  }
 }
