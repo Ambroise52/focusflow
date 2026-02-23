@@ -23,7 +23,7 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
-      "~*": ["./*"],
+      "~*": ["./src/*"],
       "@/*": ["./src/*"]
     },
     "types": ["chrome", "node"]

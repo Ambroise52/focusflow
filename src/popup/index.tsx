@@ -9,7 +9,7 @@ import PaywallModal    from "./components/PaywallModal";
 import { getSettings }   from "../lib/storage";
 import { isPremiumUser } from "../lib/supabase";
 
-import "../../styles/globals.css"; // Tailwind base styles
+import "./style.css"; // Tailwind base styles
 
 // ─────────────────────────────────────────────
 // Types
